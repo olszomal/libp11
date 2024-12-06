@@ -94,10 +94,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: 'x86'
+          - id: windows-x86-vs
+            triplet: x86-windows
             build_for: 'WIN32'
-          - arch: 'x64'
+            compiler: vs
+            arch: x86
+            os: windows-latest
+            generator: Ninja
+            vcpkg_root: C:/vcpkg
+          - id: windows-x64-vs
+            triplet: x64-windows
             build_for: 'WIN64'
+            compiler: vs
+            arch: x64
+            os: windows-latest
+            generator: Ninja
+            vcpkg_root: C:/vcpkg
 
     runs-on: windows-latest
 
@@ -108,7 +120,10 @@ jobs:
       uses: actions/cache@v4
       with:
         path: C:/Users/runneradmin/AppData/Local/vcpkg/archives
-        key: ${{matrix.arch}}
+        key: ${{matrix.id}}-${{hashFiles('vcpkg.json')}}
+        restore-keys: |
+          ${{matrix.id}}-${{hashFiles('vcpkg.json')}}
+          ${{matrix.id}}-
 
     - name: Configure Visual Studio
       uses: ilammy/msvc-dev-cmd@v1
@@ -117,8 +132,8 @@ jobs:
 
     - name: Install OpenSSL with VCPKG
       run: |
-        vcpkg install --triplet=${{matrix.arch}}-windows openssl
-        echo "C:\vcpkg\packages\openssl_${{matrix.arch}}-windows\tools\openssl" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        vcpkg install --triplet=${{matrix.triplet}} openssl[tools]
+        echo "C:\vcpkg\packages\openssl_${{matrix.triplet}}\tools\openssl" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
     - name: System information
       run: openssl version -a
@@ -126,7 +141,7 @@ jobs:
     - name: Build
       run: nmake -f Makefile.mak
         BUILD_FOR=${{matrix.build_for}}
-        OPENSSL_DIR="C:\vcpkg\packages\openssl_${{matrix.arch}}-windows"
+        OPENSSL_DIR="C:\vcpkg\packages\openssl_${{matrix.triplet}}"
 
     - name: Upload the DLLs
       uses: actions/upload-artifact@v4
