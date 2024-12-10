@@ -504,8 +504,9 @@ static void *ctx_try_load_object(ENGINE_CTX *ctx,
 		}
 		ctx_log(ctx, 1, "\n");
 
-		/* Ignore slots without tokens or with uninitialized token */
-		if (found_slot && found_slot->token && found_slot->token->initialized) {
+		/* Ignore slots without tokens. Thales HSM (and potentially
+		 * other modules) allow objects on uninitialized tokens. */
+		if (found_slot && found_slot->token) {
 			matched_slots[matched_count] = found_slot;
 			matched_count++;
 		}
@@ -526,9 +527,9 @@ static void *ctx_try_load_object(ENGINE_CTX *ctx,
 		} else {
 			found_slot = PKCS11_find_token(ctx->pkcs11_ctx,
 								ctx->slot_list, ctx->slot_count);
-			/* Ignore if the the token is not initialized */
-			if (found_slot && found_slot->token &&
-					found_slot->token->initialized) {
+			/* Ignore slots without tokens. Thales HSM (and potentially
+			 * other modules) allow objects on uninitialized tokens. */
+			if (found_slot && found_slot->token) {
 				matched_slots[matched_count] = found_slot;
 				matched_count++;
 			} else {
