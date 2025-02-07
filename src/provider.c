@@ -1,0 +1,854 @@
+/*
+ * Code build on definitions from OpenSSL 3 documentation.
+ *
+ * Copyright © 2025 Mobi - Com Polska Sp. z o.o.
+ * Author: Małgorzata Olszówka <Malgorzata.Olszowka@stunnel.org>
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef _PROVIDER_PKCS11_H
+#define _PROVIDER_PKCS11_H
+
+#ifndef _WIN32
+#include "config.h"
+#endif /* _WIN32 */
+
+#include "util.h"
+#include "p11_pthread.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <openssl/crypto.h>
+#include <openssl/core.h>
+#include <openssl/core_dispatch.h>
+#include <openssl/core_names.h>
+#include <openssl/core_object.h>
+#include <openssl/store.h>
+
+#define PKCS11_PROVIDER_NAME "libp11 PKCS#11 provider"
+
+/* provider entry point (fixed name, exported) */
+OSSL_provider_init_fn provider_init;
+
+#define PROVIDER_FN(name) static OSSL_FUNC_##name##_fn name
+PROVIDER_FN(provider_teardown);
+PROVIDER_FN(provider_gettable_params);
+PROVIDER_FN(provider_get_params);
+PROVIDER_FN(provider_query_operation);
+PROVIDER_FN(provider_get_reason_strings);
+PROVIDER_FN(store_open);
+PROVIDER_FN(store_settable_ctx_params);
+PROVIDER_FN(store_set_ctx_params);
+PROVIDER_FN(store_load);
+PROVIDER_FN(store_eof);
+PROVIDER_FN(store_close);
+#undef PROVIDER_FN
+
+#ifndef OSSL_DISPATCH_END
+#define OSSL_DISPATCH_END { 0, NULL }
+#endif /* OSSL_DISPATCH_END */
+
+static const OSSL_DISPATCH provider_functions[] = {
+	{OSSL_FUNC_PROVIDER_TEARDOWN, (void (*)(void))provider_teardown},
+	{OSSL_FUNC_PROVIDER_GETTABLE_PARAMS, (void (*)(void))provider_gettable_params},
+	{OSSL_FUNC_PROVIDER_GET_PARAMS, (void (*)(void))provider_get_params},
+	{OSSL_FUNC_PROVIDER_QUERY_OPERATION, (void (*)(void))provider_query_operation},
+	{OSSL_FUNC_PROVIDER_GET_REASON_STRINGS, (void (*)(void))provider_get_reason_strings},
+	OSSL_DISPATCH_END
+};
+
+static const OSSL_DISPATCH store_functions[] = {
+	{OSSL_FUNC_STORE_OPEN, (void (*)(void))store_open},
+	{OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS, (void (*)(void))store_settable_ctx_params},
+	{OSSL_FUNC_STORE_SET_CTX_PARAMS, (void (*)(void))store_set_ctx_params},
+	{OSSL_FUNC_STORE_LOAD, (void (*)(void))store_load},
+	{OSSL_FUNC_STORE_EOF, (void (*)(void))store_eof},
+	{OSSL_FUNC_STORE_CLOSE, (void (*)(void))store_close},
+	OSSL_DISPATCH_END
+};
+
+static const OSSL_ALGORITHM p11_storemgmt[] = {
+	{"PKCS11", "provider=pkcs11", store_functions, "PKCS#11 storage functions"},
+	{NULL, NULL, NULL, NULL}
+};
+
+enum P11_STORE_CTX_STATE {
+	P11_STORE_CTX_STATE_INITIAL = 0,
+	P11_STORE_CTX_STATE_LOADING,
+	P11_STORE_CTX_STATE_LOADED,
+	P11_STORE_CTX_STATE_ERROR
+};
+
+typedef struct {
+	/* provider configuration */
+	const OSSL_CORE_HANDLE *handle;
+	UTIL_CTX *util_ctx;
+	pthread_mutex_t lock;
+
+	/* default core params */
+	const char *openssl_version;
+	char *provider_name;
+
+	/* custom core params */
+	char *pkcs11_module;
+	char *init_args;
+	char *pin;
+	int debug_level;
+	int force_login;
+	char *p_debug_level;
+	char *p_force_login;
+
+	/* function offered by libcrypto to the provider */
+	OSSL_FUNC_core_gettable_params_fn *core_gettable_params;
+	OSSL_FUNC_core_get_params_fn *core_get_params;
+	OSSL_FUNC_core_new_error_fn *core_new_error;
+	OSSL_FUNC_core_set_error_debug_fn *core_set_error_debug;
+	OSSL_FUNC_core_vset_error_fn *core_vset_error;
+} PROVIDER_CTX;
+
+typedef struct {
+	PROVIDER_CTX *prov_ctx;
+	char *uri;
+	int expected_type;
+	enum P11_STORE_CTX_STATE state;
+} P11_STORE_CTX;
+
+typedef struct {
+    enum {
+        is_expl_passphrase = 1, /* Explicit passphrase given by user */
+        is_pem_password,        /* pem_password_cb given by user */
+        is_ossl_passphrase,     /* OSSL_PASSPHRASE_CALLBACK given by user */
+        is_ui_method            /* UI_METHOD given by user */
+    } type;
+
+    /* UI method data (only relevant if type == is_ui_method) */
+    UI_METHOD *ui_method;
+    void *ui_method_data;
+
+    /* Whether passphrase caching is enabled */
+    unsigned int flag_cache_passphrase:1;
+
+    /* Cached passphrase (if applicable) */
+    char *cached_passphrase;
+    size_t cached_passphrase_len;
+} PASSPHRASE_DATA;
+
+static int shutdown_mode = 0;
+
+#if defined(_WIN32) || defined(_WIN64)
+#define strcasecmp _stricmp
+#endif
+
+/******************************************************************************/
+/* Utility functions                                                          */
+/******************************************************************************/
+
+void PROVIDER_CTX_log(PROVIDER_CTX *prov_ctx, int level, int reason, int line, const char *file, const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	if (!prov_ctx) {
+		vfprintf(stderr, format, args);
+	} else if (level <= prov_ctx->debug_level) {
+		if (level <= 3) { /* LOG_ERR */
+			prov_ctx->core_new_error(prov_ctx->handle);
+			prov_ctx->core_set_error_debug(prov_ctx->handle, OPENSSL_FILE, line, file);
+			prov_ctx->core_vset_error(prov_ctx->handle, reason, format, args);
+		} else if (level == 4) { /* LOG_WARNING */
+			vfprintf(stderr, format, args);
+		} else {
+			vprintf(format, args);
+		}
+	}
+	va_end(args);
+}
+
+/*
+ * PKCS#11 modules that register their own atexit() callbacks may
+ * already have been cleaned up by the time OpenSSL's atexit() callback
+ * is executed. As a result, a crash occurs with certain versions of
+ * OpenSSL and SoftHSM2. The workaround skips the execution of
+ * ENGINE_CTX_finish() during OpenSSL's cleanup, converting the crash into
+ * a harmless memory leak at exit.
+ */
+static void exit_callback(void)
+{
+	shutdown_mode = 1;
+}
+
+/******************************************************************************/
+/* Provider load public/private key and certificate                           */
+/******************************************************************************/
+
+EVP_PKEY *PROVIDER_CTX_load_privkey(PROVIDER_CTX *prov_ctx, const char *key_id,
+		UI_METHOD *ui_method, void *ui_data)
+{
+	EVP_PKEY *evp_pkey;
+
+	pthread_mutex_lock(&prov_ctx->lock);
+
+	/* Delayed libp11 initialization */
+	if (UTIL_CTX_init_libp11(prov_ctx->util_ctx)) {
+		pthread_mutex_unlock(&prov_ctx->lock);
+		return NULL;
+	}
+	UTIL_CTX_set_ui_method(prov_ctx->util_ctx, ui_method, ui_data);
+	evp_pkey = UTIL_CTX_get_privkey_from_uri(prov_ctx->util_ctx, key_id);
+	UTIL_CTX_set_ui_method(prov_ctx->util_ctx, ui_method, NULL);
+
+	pthread_mutex_unlock(&prov_ctx->lock);
+
+	return evp_pkey;
+}
+
+EVP_PKEY *PROVIDER_CTX_load_pubkey(PROVIDER_CTX *prov_ctx, const char *key_id,
+		UI_METHOD *ui_method, void *ui_data)
+{
+	EVP_PKEY *evp_pkey;
+
+	pthread_mutex_lock(&prov_ctx->lock);
+
+	/* Delayed libp11 initialization */
+	if (UTIL_CTX_init_libp11(prov_ctx->util_ctx)) {
+		pthread_mutex_unlock(&prov_ctx->lock);
+		return NULL;
+	}
+	UTIL_CTX_set_ui_method(prov_ctx->util_ctx, ui_method, ui_data);
+	evp_pkey = UTIL_CTX_get_pubkey_from_uri(prov_ctx->util_ctx, key_id);
+	UTIL_CTX_set_ui_method(prov_ctx->util_ctx, ui_method, NULL);
+
+	pthread_mutex_unlock(&prov_ctx->lock);
+
+	return evp_pkey;
+}
+
+X509 *PROVIDER_CTX_load_cert(PROVIDER_CTX *prov_ctx, const char *key_id,
+		UI_METHOD *ui_method, void *ui_data)
+{
+	X509 *cert;
+
+	pthread_mutex_lock(&prov_ctx->lock);
+
+	/* Delayed libp11 initialization */
+	if (UTIL_CTX_init_libp11(prov_ctx->util_ctx)) {
+		pthread_mutex_unlock(&prov_ctx->lock);
+		return NULL;
+	}
+	UTIL_CTX_set_ui_method(prov_ctx->util_ctx, ui_method, ui_data);
+	cert = UTIL_CTX_get_cert_from_uri(prov_ctx->util_ctx, key_id);
+	UTIL_CTX_set_ui_method(prov_ctx->util_ctx, ui_method, NULL);
+
+	pthread_mutex_unlock(&prov_ctx->lock);
+
+	return cert;
+}
+
+/******************************************************************************/
+/* Provider init helper functions                                             */
+/******************************************************************************/
+
+PROVIDER_CTX *PROVIDER_CTX_new(void)
+{
+	PROVIDER_CTX *prov_ctx = OPENSSL_zalloc(sizeof(PROVIDER_CTX));
+
+	if (!prov_ctx)
+		return NULL;
+
+	prov_ctx->util_ctx = UTIL_CTX_new();
+	if (!prov_ctx->util_ctx) {
+		OPENSSL_free(prov_ctx);
+		return NULL;
+	}
+	pthread_mutex_init(&prov_ctx->lock, 0);
+
+	/* Logging */
+	prov_ctx->debug_level = LOG_NOTICE;
+
+	return prov_ctx;
+}
+
+/*
+ * Frees all resources associated with a provider context.
+ */
+void PROVIDER_CTX_destroy(PROVIDER_CTX *prov_ctx)
+{
+	if (!shutdown_mode)
+		UTIL_CTX_free_libp11(prov_ctx->util_ctx);
+	UTIL_CTX_free(prov_ctx->util_ctx);
+	pthread_mutex_destroy(&prov_ctx->lock);
+	OPENSSL_free(prov_ctx->provider_name);
+	OPENSSL_free(prov_ctx->p_force_login);
+	OPENSSL_free(prov_ctx->p_debug_level);
+	OPENSSL_free(prov_ctx->pkcs11_module);
+	OPENSSL_free(prov_ctx);
+}
+
+/*
+ * Retrieves function pointers provided by the OpenSSL core.
+ */
+void PROVIDER_CTX_get_core_functions(PROVIDER_CTX *prov_ctx, const OSSL_DISPATCH *in)
+{
+	for (; in->function_id != 0; in++) {
+		switch (in->function_id) {
+		case OSSL_FUNC_CORE_GETTABLE_PARAMS:
+			prov_ctx->core_gettable_params = OSSL_FUNC_core_gettable_params(in);
+			break;
+		case OSSL_FUNC_CORE_GET_PARAMS:
+			prov_ctx->core_get_params = OSSL_FUNC_core_get_params(in);
+			break;
+		case OSSL_FUNC_CORE_NEW_ERROR:
+			prov_ctx->core_new_error = OSSL_FUNC_core_new_error(in);
+			break;
+		case OSSL_FUNC_CORE_SET_ERROR_DEBUG:
+			prov_ctx->core_set_error_debug = OSSL_FUNC_core_set_error_debug(in);
+			break;
+		case OSSL_FUNC_CORE_VSET_ERROR:
+			prov_ctx->core_vset_error = OSSL_FUNC_core_vset_error(in);
+			break;
+		default:
+			/* Just ignore anything we don't understand */
+			break;
+		}
+	}
+}
+
+/*
+ * Retrieves parameters provided by the core and deep copy of global configuration
+ * parameters associated with provider. The parameters are returned by
+ * reference, not as copies, and so the elements of the param array must have
+ * OSSL_PARAM_UTF8_PTR as their data_type.
+ */
+int PROVIDER_CTX_get_core_params(PROVIDER_CTX *prov_ctx)
+{
+	int rv;
+	OSSL_PARAM core_params[] = {
+		/* core default params */
+		{OSSL_PROV_PARAM_CORE_VERSION, OSSL_PARAM_UTF8_PTR, &prov_ctx->openssl_version, 0, 0},
+		{OSSL_PROV_PARAM_CORE_PROV_NAME, OSSL_PARAM_UTF8_PTR, &prov_ctx->provider_name, 0, 0},
+		/* provider specific params */
+		{"pkcs11_module", OSSL_PARAM_UTF8_PTR, &prov_ctx->pkcs11_module, 0, 0},
+		{"debug_level", OSSL_PARAM_UTF8_PTR, &prov_ctx->p_debug_level, 0, 0},
+		{"force_login", OSSL_PARAM_UTF8_PTR, &prov_ctx->p_force_login, 0, 0},
+		{"pin", OSSL_PARAM_UTF8_PTR, &prov_ctx->pin, 0, 0},
+		{"init_args", OSSL_PARAM_UTF8_PTR, &prov_ctx->init_args, 0, 0},
+		OSSL_PARAM_END
+	};
+
+	if (!prov_ctx || !prov_ctx->handle || !prov_ctx->core_get_params)
+		return 0;
+
+	/* core_get_params() reads only OSSL_PARAM_UTF8_PTR */
+	rv = prov_ctx->core_get_params(prov_ctx->handle, core_params);
+
+	if (prov_ctx->provider_name) {
+		char *buffer = OPENSSL_zalloc(strlen(PKCS11_PROVIDER_NAME) + strlen(prov_ctx->provider_name) + 4);
+
+		if (buffer) {
+			sprintf(buffer, "%s (%s)", PKCS11_PROVIDER_NAME, prov_ctx->provider_name);
+			prov_ctx->provider_name = buffer;
+		}
+	}
+	if (!prov_ctx->provider_name)
+		prov_ctx->provider_name = OPENSSL_strdup(PKCS11_PROVIDER_NAME);
+
+	if (prov_ctx->pkcs11_module)
+		prov_ctx->pkcs11_module = OPENSSL_strdup(prov_ctx->pkcs11_module);
+
+	if (prov_ctx->p_debug_level)
+		prov_ctx->p_debug_level = OPENSSL_strdup(prov_ctx->p_debug_level);
+
+	if (prov_ctx->p_force_login)
+		prov_ctx->p_force_login = OPENSSL_strdup(prov_ctx->p_force_login);
+
+	return rv;
+}
+
+/*
+ * Updates the provider context with environment variable values.
+ */
+void PROVIDER_CTX_get_environment_parameters(PROVIDER_CTX *prov_ctx)
+{
+	char *str;
+
+	str = getenv("PKCS11MODULE");
+	if (str != NULL && str[0] != '\0') {
+		OPENSSL_free(prov_ctx->pkcs11_module);
+		prov_ctx->pkcs11_module = OPENSSL_strdup(str);
+	}
+	str = getenv("DEBUGLEVEL");
+	if (str != NULL && str[0] != '\0') {
+		OPENSSL_free(prov_ctx->p_debug_level);
+		prov_ctx->p_debug_level = OPENSSL_strdup(str);
+	}
+	str = getenv("FORCELOGIN");
+	if (str != NULL && str[0] != '\0') {
+		OPENSSL_free(prov_ctx->p_force_login);
+		prov_ctx->p_force_login = OPENSSL_strdup(str);
+	}
+}
+
+#define READINT(arg) \
+	if (prov_ctx->p_##arg && *prov_ctx->p_##arg != '\0') \
+		prov_ctx->arg = atoi(prov_ctx->p_##arg);
+
+#define READBOOL(arg) \
+	if (prov_ctx->p_##arg && *prov_ctx->p_##arg != '\0') { \
+		if (isdigit(*prov_ctx->p_##arg)) { \
+			prov_ctx->arg = (atoi(prov_ctx->p_##arg) != 0); \
+		} else { \
+			prov_ctx->arg = (strcasecmp("true", prov_ctx->p_##arg) == 0 \
+			|| strcasecmp("yes", prov_ctx->p_##arg) == 0); \
+		} \
+	}
+
+/*
+ * Sets provider context parameters in the utility context.
+ */
+int PROVIDER_CTX_set_parameters(PROVIDER_CTX *prov_ctx)
+{
+	/* Check required parameter */
+	if (!prov_ctx->util_ctx)
+		return 0;
+
+	READINT(debug_level)
+	UTIL_CTX_set_debug_level(prov_ctx->util_ctx, prov_ctx->debug_level);
+
+	if (!prov_ctx->pkcs11_module || !UTIL_CTX_set_module(prov_ctx->util_ctx, prov_ctx->pkcs11_module))
+		return 0;
+
+	if (prov_ctx->init_args && !UTIL_CTX_set_init_args(prov_ctx->util_ctx, prov_ctx->init_args))
+		return 0;
+
+	if (prov_ctx->pin && !UTIL_CTX_set_pin(prov_ctx->util_ctx, (const char *)prov_ctx->pin))
+		return 0;
+
+	READBOOL(force_login)
+	if (prov_ctx->force_login)
+		UTIL_CTX_set_force_login(prov_ctx->util_ctx, 1);
+
+	return 1;
+}
+
+#undef READINT
+#undef READBOOL
+
+
+/******************************************************************************/
+/* Load and initialize a provider                                             */
+/******************************************************************************/
+
+/*
+ * This is the only directly exposed function of the provider.
+ * When OpenSSL loads the library, this function gets called.
+ */
+int OSSL_provider_init(const OSSL_CORE_HANDLE *handle, const OSSL_DISPATCH *in,
+	const OSSL_DISPATCH **out, void **ctx)
+{
+	return provider_init(handle, in, out, ctx);
+}
+
+int provider_init(const OSSL_CORE_HANDLE *handle, const OSSL_DISPATCH *in,
+	const OSSL_DISPATCH **out, void **ctx)
+{
+	PROVIDER_CTX *prov_ctx = NULL;
+
+	/*  Create a context */
+	prov_ctx = PROVIDER_CTX_new();
+	if (!prov_ctx)
+		goto err;
+
+	/* Save core handle */
+	prov_ctx->handle = handle;
+
+	/* Get all core functions and check existence of required ones */
+	PROVIDER_CTX_get_core_functions(prov_ctx, in);
+
+	/* Get all core parameters */
+	if (!PROVIDER_CTX_get_core_params(prov_ctx))
+		goto err;
+
+	/* Overwrite parameters from environment */
+	PROVIDER_CTX_get_environment_parameters(prov_ctx);
+
+	/* Set parameters into the util_ctx */
+	if (!PROVIDER_CTX_set_parameters(prov_ctx))
+		goto err;
+
+	/* Init successful */
+	*out = provider_functions;
+	*ctx = prov_ctx;
+
+	atexit(exit_callback);
+	return 1;
+
+err:
+	provider_teardown(prov_ctx);
+	return 0;
+}
+
+
+/******************************************************************************/
+/* Provider functions                                                         */
+/******************************************************************************/
+
+/*
+ * Cleans of provider related stuff.
+ */
+static void provider_teardown(void *ctx)
+{
+	PROVIDER_CTX *prov_ctx = (PROVIDER_CTX *)ctx;
+
+	if (!prov_ctx)
+		return;
+
+	PROVIDER_CTX_destroy(prov_ctx);
+	ERR_clear_error();
+}
+
+/*
+ * Returns a constant array of descriptor OSSL_PARAM, for parameters that
+ * provider_get_params() can handle.
+ */
+static const OSSL_PARAM *provider_gettable_params(void *ctx)
+{
+	static const OSSL_PARAM gettable_params[] = {
+		OSSL_PARAM_DEFN(OSSL_PROV_PARAM_NAME, OSSL_PARAM_UTF8_PTR, NULL, 0),
+		OSSL_PARAM_DEFN(OSSL_PROV_PARAM_VERSION, OSSL_PARAM_UTF8_PTR, NULL, 0),
+		OSSL_PARAM_DEFN(OSSL_PROV_PARAM_BUILDINFO, OSSL_PARAM_UTF8_PTR, NULL, 0),
+		OSSL_PARAM_DEFN(OSSL_PROV_PARAM_STATUS, OSSL_PARAM_INTEGER, NULL, 0),
+		OSSL_PARAM_END
+	};
+
+	if (!ctx)
+		return NULL;
+
+	return gettable_params;
+}
+
+/*
+ * Process the OSSL_PARAM array params, setting the values of the parameters it
+ * understands.
+ */
+static int provider_get_params(void *ctx, OSSL_PARAM params[])
+{
+	PROVIDER_CTX *prov_ctx = (PROVIDER_CTX *)ctx;
+	OSSL_PARAM *p;
+
+	if (!prov_ctx || !params)
+		return 0;
+
+	p = OSSL_PARAM_locate(params, OSSL_PROV_PARAM_NAME);
+	if (p != NULL && !OSSL_PARAM_set_utf8_ptr(p, prov_ctx->provider_name))
+		return 0;
+
+	p = OSSL_PARAM_locate(params, OSSL_PROV_PARAM_VERSION);
+	if (p != NULL && !OSSL_PARAM_set_utf8_ptr(p, prov_ctx->openssl_version))
+		return 0;
+
+	p = OSSL_PARAM_locate(params, OSSL_PROV_PARAM_BUILDINFO);
+	if (p != NULL && !OSSL_PARAM_set_utf8_ptr(p, OPENSSL_FULL_VERSION_STR))
+		return 0;
+
+	p = OSSL_PARAM_locate(params, OSSL_PROV_PARAM_STATUS);
+	if (p != NULL && !OSSL_PARAM_set_int(p, 1))
+		return 0;
+
+	return 1;
+}
+
+/*
+ * Returns the defined operations based on the operation_id value. Possible
+ * list of operations are defined by OpenSSL3. This library defines only a
+ * subset.
+ */
+static const OSSL_ALGORITHM *provider_query_operation(void *ctx,
+		int operation_id, int *no_store)
+{
+	(void)ctx;
+	*no_store = 0;
+	if (operation_id == OSSL_OP_STORE)
+		return p11_storemgmt;
+	else
+		return NULL;
+}
+
+/*
+ * Returns a constant reason_strings[] array that provides reason strings for
+ * reason codes the provider may use when reporting errors using core_put_error().
+ */
+static const OSSL_ITEM *provider_get_reason_strings(void *ctx)
+{
+	static const OSSL_ITEM reason_strings[] = {
+		{1, "Failed to enumerate PKCS#11 slots"},
+		{2, "Failed to retrieve private key"},
+		{3, "Failed to retrieve public key"},
+		{4, "Failed to retrieve certificate"},
+		{5, "Memory allocation failed"},
+		{6, "Failed to retrieve key type name"},
+		{7, "Failed to encode X.509 certificate"},
+		{8, "Callback argument is NULL"},
+		{9, "No key available for OSSL_STORE_INFO"},
+		{10, "Failed to retrieve OSSL_STORE_PARAM_EXPECT"},
+		{0, NULL} /* Sentinel value */
+	};
+
+	(void)ctx;
+	return reason_strings;
+}
+
+
+/******************************************************************************/
+/* Store functions                                                            */
+/******************************************************************************/
+
+/*
+ * Creates a provider side context with data based on the input uri.
+ */
+static void *store_open(void *ctx, const char *uri)
+{
+	P11_STORE_CTX *store_ctx;
+	PROVIDER_CTX *prov_ctx = (PROVIDER_CTX *)ctx;
+
+	if (!prov_ctx)
+		return NULL;
+
+	store_ctx = OPENSSL_zalloc(sizeof(P11_STORE_CTX));
+	if (!store_ctx) {
+		PROVIDER_CTX_log(prov_ctx, LOG_ERR, 5, OPENSSL_LINE, OPENSSL_FUNC, NULL);
+		return NULL;
+	}
+	store_ctx->prov_ctx = prov_ctx;
+	store_ctx->uri = OPENSSL_strdup(uri);
+	store_ctx->state = P11_STORE_CTX_STATE_INITIAL;
+	return store_ctx;
+}
+
+/*
+ * Returns a constant array of descriptor OSSL_PARAM(3), for parameters that
+ * p11_store_set_ctx_params() can handle.
+ */
+static const OSSL_PARAM *store_settable_ctx_params(void *ctx)
+{
+	static const OSSL_PARAM settable_ctx_params[] = {
+		OSSL_PARAM_int(OSSL_STORE_PARAM_EXPECT, NULL),
+		OSSL_PARAM_END
+	};
+
+	(void)(ctx);
+	return settable_ctx_params;
+}
+
+/*
+ * Sets additional parameters, such as what kind of data to expect.
+ */
+static int store_set_ctx_params(void *ctx, const OSSL_PARAM params[])
+{
+	const OSSL_PARAM *param;
+	P11_STORE_CTX *store_ctx = (P11_STORE_CTX *)ctx;
+
+	if (!store_ctx)
+		return 0;
+
+	/* passing NULL for params returns true */
+	if (!params || !params->key)
+		return 1;
+
+	param = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_EXPECT);
+	if (param != NULL && !OSSL_PARAM_get_int(param, &store_ctx->expected_type)) {
+		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 10, OPENSSL_LINE, OPENSSL_FUNC, NULL);
+		return 0;
+	}
+
+	return 1;
+}
+
+/*
+ * Loads the next object from the URI opened by store_open(),
+ * creates an object abstraction for it (see provider-object(7)),
+ * and calls object_cb with it as well as object_cbarg.
+ * object_cb will then interpret the object abstraction and do what it can
+ * to wrap it or decode it into an OpenSSL structure.
+ * In case a passphrase needs to be prompted to unlock an object, pw_cb should be called.
+ */
+static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
+		OSSL_PASSPHRASE_CALLBACK *pw_cb, void *pw_cbarg)
+{
+	EVP_PKEY *pkey = NULL, *pubkey = NULL;
+	X509 *cert;
+	OSSL_PARAM params[4], *p = params;
+	const char *data_type;
+	int object_type, len;
+	unsigned char *tmp, *data = NULL;
+	P11_STORE_CTX *store_ctx;
+	PASSPHRASE_DATA *pass_data = (PASSPHRASE_DATA *)pw_cbarg;
+	UI_METHOD *ui_method = NULL;
+	void *ui_data = NULL;
+
+	(void)pw_cb;
+
+	store_ctx = (P11_STORE_CTX *)ctx;
+	if (!store_ctx)
+		return 0;
+
+	store_ctx->state = P11_STORE_CTX_STATE_LOADING;
+
+	if (pass_data && pass_data->type == is_ui_method) {
+		ui_method = pass_data->ui_method;
+		ui_data = pass_data->ui_method_data;
+	} else {
+		/* using the current default UI method */
+		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_DEBUG, 0, 0, 0,
+			"No custom UI method provided, using the default UI method.\n");
+	}
+
+	switch (store_ctx->expected_type) {
+	case OSSL_STORE_INFO_PKEY:
+		pkey = PROVIDER_CTX_load_privkey(store_ctx->prov_ctx, store_ctx->uri, ui_method, ui_data);
+		if (!pkey) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 2, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		data_type = EVP_PKEY_get0_type_name(pkey);
+		if (!data_type) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 6, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		object_type = OSSL_OBJECT_PKEY;
+		break;
+	case OSSL_STORE_INFO_PUBKEY:
+		pubkey = PROVIDER_CTX_load_pubkey(store_ctx->prov_ctx, store_ctx->uri, ui_method, ui_data);
+		if (!pubkey) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 3, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		data_type = EVP_PKEY_get0_type_name(pubkey);
+		if (!data_type) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 6, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		object_type = OSSL_OBJECT_PKEY;
+		break;
+	case OSSL_STORE_INFO_CERT:
+		cert = PROVIDER_CTX_load_cert(store_ctx->prov_ctx, store_ctx->uri, ui_method, ui_data);
+		if (!cert) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 4, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		len = i2d_X509(cert, NULL);
+		if (len < 0) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 7, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		tmp = data = OPENSSL_malloc((size_t)len);
+		if (!tmp) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 5, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		i2d_X509(cert, &tmp);
+		X509_free(cert);
+		/* If we have a data type, it should be a PEM name */
+		data_type = "PEM_STRING_X509";
+		object_type = OSSL_OBJECT_CERT;
+		break;
+	default:
+		goto err;
+	}
+
+	*p++ = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
+	*p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)data_type, 0);
+	if (pkey)
+		*p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_REFERENCE, pkey, sizeof(pkey));
+	else if (pubkey)
+		*p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_REFERENCE, pubkey, sizeof(pubkey));
+	else
+		*p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_DATA, data, len);
+	*p = OSSL_PARAM_construct_end();
+
+	if (!object_cb(params, object_cbarg)) {
+		/* callback failed */
+		struct ossl_load_result_data_st {
+			OSSL_STORE_INFO *v; /* to be filled in */
+			OSSL_STORE_CTX *store_ctx;
+		} *cbdata = object_cbarg;
+
+		if (!cbdata) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 8, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		if (pkey)
+			cbdata->v = OSSL_STORE_INFO_new_PKEY(pkey);
+		else if (pubkey)
+			cbdata->v = OSSL_STORE_INFO_new_PUBKEY(pubkey);
+		else {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 9, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+
+	}
+	OPENSSL_free(data);
+	store_ctx->state = P11_STORE_CTX_STATE_LOADED;
+	return 1;
+
+err:
+	store_ctx->state = P11_STORE_CTX_STATE_ERROR;
+	EVP_PKEY_free(pkey);
+	EVP_PKEY_free(pubkey);
+	OPENSSL_free(data);
+	return 0;
+}
+
+/*
+ * Indicates if the end of the set of objects from the URI has been reached.
+ * When that happens, there's no point trying to do any further loading.
+ */
+static int store_eof(void *ctx)
+{
+	P11_STORE_CTX *store_ctx = (P11_STORE_CTX *)ctx;
+
+	if (!store_ctx)
+		return 0;
+
+	return (store_ctx->state == P11_STORE_CTX_STATE_LOADED
+			|| store_ctx->state == P11_STORE_CTX_STATE_ERROR);
+}
+
+/*
+ * Frees the provider side context.
+ */
+static int store_close(void *ctx)
+{
+	P11_STORE_CTX *store_ctx = (P11_STORE_CTX *)ctx;
+
+	if (!store_ctx)
+		return 0;
+
+	OPENSSL_free(store_ctx->uri);
+	OPENSSL_free(store_ctx);
+	return 1;
+}
+
+#endif /* _PROVIDER_PKCS11_H */
+
+/* vim: set noexpandtab: */
