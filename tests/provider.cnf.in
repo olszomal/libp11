@@ -1,0 +1,20 @@
+HOME			= .
+RANDFILE		= $ENV::HOME/.rnd
+
+openssl_conf = openssl_def
+
+[openssl_def]
+providers = providers_section
+
+[providers_section]
+pkcs11 = pkcs11_section
+default = default_section
+
+[pkcs11_section]
+identity = pkcs11prov
+pkcs11_module = @MODULE_PATH@
+debug_level = 7
+activate = 1
+
+[default_section]
+activate = 1

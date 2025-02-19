@@ -29,7 +29,7 @@ module = /usr/lib64/ossl-modules/pkcs11prov.so
 pkcs11_module = /usr/lib64/opensc-pkcs11.so
 
 # set the debug level
-debug_level = 5
+debug_level = 7
 
 # force login to the PKCS#11 module
 #force_login = 1
