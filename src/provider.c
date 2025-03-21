@@ -89,13 +89,6 @@ static const OSSL_ALGORITHM p11_storemgmt[] = {
 	{NULL, NULL, NULL, NULL}
 };
 
-enum P11_STORE_CTX_STATE {
-	P11_STORE_CTX_STATE_INITIAL = 0,
-	P11_STORE_CTX_STATE_LOADING,
-	P11_STORE_CTX_STATE_LOADED,
-	P11_STORE_CTX_STATE_ERROR
-};
-
 typedef struct {
 	char *pkcs11_module;
 	char *pin;
@@ -135,7 +128,13 @@ typedef struct {
 	PROVIDER_CTX *prov_ctx;
 	char *uri;
 	int expected_type;
-	enum P11_STORE_CTX_STATE state;
+	int types_tried;
+	void *object_value;
+	const char *data_type;
+	int object_type;
+	int info_type;
+	UI_METHOD *ui_method;
+	void *ui_data;
 } P11_STORE_CTX;
 
 typedef struct {
@@ -200,22 +199,6 @@ static void PROVIDER_CTX_log(PROVIDER_CTX *prov_ctx, int level, int reason, int 
 static void exit_callback(void)
 {
 	g_shutdown_mode = 1;
-}
-
-static EVP_PKEY *PROVIDER_CTX_load_key(P11_STORE_CTX *store_ctx,
-		UI_METHOD *ui_method, void *ui_data)
-{
-	EVP_PKEY *evp_pkey;
-
-	if (store_ctx->expected_type == OSSL_STORE_INFO_PKEY) {
-		evp_pkey = UTIL_CTX_get_privkey_from_uri(store_ctx->prov_ctx->util_ctx,
-			store_ctx->uri, ui_method, ui_data);
-		UTIL_CTX_set_ui_method(store_ctx->prov_ctx->util_ctx, ui_method, NULL);
-	} else {
-		evp_pkey = UTIL_CTX_get_pubkey_from_uri(store_ctx->prov_ctx->util_ctx,
-			store_ctx->uri, ui_method, ui_data);
-	}
-	return evp_pkey;
 }
 
 /*
@@ -613,15 +596,12 @@ static const OSSL_ITEM *provider_get_reason_strings(void *ctx)
 {
 	static const OSSL_ITEM reason_strings[] = {
 		{1, "Memory allocation failed"},
-		{2, "Failed to retrieve key"},
-		{3, "Failed to retrieve certificate"},
+		{2, "Failed to set provider parameters"},
+		{3, "Failed to init libp11"},
 		{4, "Failed to encode X.509 certificate"},
-		{5, "Failed to retrieve key type name"},
-		{6, "Callback argument is NULL"},
-		{7, "No object available for OSSL_STORE_INFO"},
-		{8, "Failed to retrieve OSSL_STORE_PARAM_EXPECT"},
-		{9, "Failed to set provider parameters"},
-		{10, "Failed to init libp11"},
+		{5, "Callback argument is NULL"},
+		{6, "No object available for OSSL_STORE_INFO"},
+		{7, "Failed to retrieve OSSL_STORE_PARAM_EXPECT"},
 		{0, NULL} /* Sentinel value */
 	};
 
@@ -645,13 +625,13 @@ static void *store_open(void *ctx, const char *uri)
 	if (!prov_ctx->initialized) {
 		/* Set parameters into the util_ctx */
 		if (!PROVIDER_CTX_set_parameters(prov_ctx)) {
-			PROVIDER_CTX_log(prov_ctx, LOG_ERR, 9, OPENSSL_LINE, OPENSSL_FUNC, NULL);
+			PROVIDER_CTX_log(prov_ctx, LOG_ERR, 2, OPENSSL_LINE, OPENSSL_FUNC, NULL);
 			return NULL;
 		}
 	}
 	/* Delayed libp11 initialization */
 	if (UTIL_CTX_init_libp11(prov_ctx->util_ctx)) {
-		PROVIDER_CTX_log(prov_ctx, LOG_ERR, 10, OPENSSL_LINE, OPENSSL_FUNC, NULL);
+		PROVIDER_CTX_log(prov_ctx, LOG_ERR, 3, OPENSSL_LINE, OPENSSL_FUNC, NULL);
 		return NULL;
 	}
 	prov_ctx->initialized = 1;
@@ -663,8 +643,9 @@ static void *store_open(void *ctx, const char *uri)
 	}
 	store_ctx->prov_ctx = prov_ctx;
 	store_ctx->uri = OPENSSL_strdup(uri);
-	store_ctx->state = P11_STORE_CTX_STATE_INITIAL;
-
+	store_ctx->types_tried = 0;
+	store_ctx->object_type = OSSL_OBJECT_UNKNOWN;
+	store_ctx->info_type = OSSL_OBJECT_UNKNOWN;
 	return store_ctx;
 }
 
@@ -700,7 +681,7 @@ static int store_set_ctx_params(void *ctx, const OSSL_PARAM params[])
 
 	param = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_EXPECT);
 	if (param != NULL && !OSSL_PARAM_get_int(param, &store_ctx->expected_type)) {
-		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 8, OPENSSL_LINE, OPENSSL_FUNC, NULL);
+		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 7, OPENSSL_LINE, OPENSSL_FUNC, NULL);
 		return 0;
 	}
 
@@ -719,15 +700,11 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 		OSSL_PASSPHRASE_CALLBACK *pw_cb, void *pw_cbarg)
 {
 	EVP_PKEY *key = NULL;
-	X509 *cert;
+	unsigned char *data = NULL;
+	int len = 0;
 	OSSL_PARAM params[4], *p = params;
-	const char *data_type;
-	int object_type, len;
-	unsigned char *tmp, *data = NULL;
 	P11_STORE_CTX *store_ctx;
 	PASSPHRASE_DATA *pass_data = (PASSPHRASE_DATA *)pw_cbarg;
-	UI_METHOD *ui_method = NULL;
-	void *ui_data = NULL;
 
 	(void)pw_cb;
 
@@ -735,55 +712,43 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 	if (!store_ctx)
 		return 0;
 
-	store_ctx->state = P11_STORE_CTX_STATE_LOADING;
-
 	if (pass_data && pass_data->type == is_ui_method) {
-		ui_method = pass_data->ui_method;
-		ui_data = pass_data->ui_method_data;
+		store_ctx->ui_method = pass_data->ui_method;
+		store_ctx->ui_data = pass_data->ui_method_data;
 	} else {
 		/* using the current default UI method */
 		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_DEBUG, 0, 0, 0,
 			"No custom UI method provided, using the default UI method.\n");
 	}
 
-	if (store_ctx->expected_type == OSSL_STORE_INFO_CERT) {
-		cert = UTIL_CTX_get_cert_from_uri(store_ctx->prov_ctx->util_ctx, store_ctx->uri, ui_method, ui_data);
-		if (!cert) {
-			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 3, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
-			goto err;
-		}
+	if (store_ctx->object_value == NULL && store_eof(store_ctx))
+		return 0;
+
+	if (store_ctx->info_type == OSSL_STORE_INFO_CERT) {
+		unsigned char *tmp;
+		X509 *cert = (X509 *)store_ctx->object_value;
+
 		len = i2d_X509(cert, NULL);
 		if (len < 0) {
 			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 4, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			X509_free(cert);
 			goto err;
 		}
 		tmp = data = OPENSSL_malloc((size_t)len);
 		if (!tmp) {
 			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 1, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			X509_free(cert);
 			goto err;
 		}
 		i2d_X509(cert, &tmp);
 		X509_free(cert);
-		/* If we have a data type, it should be a PEM name */
-		data_type = "PEM_STRING_X509";
-		object_type = OSSL_OBJECT_CERT;	
 	} else {
 		/* OSSL_STORE_INFO_PKEY or OSSL_STORE_INFO_PUBKEY */
-		key = PROVIDER_CTX_load_key(store_ctx, ui_method, ui_data);
-		if (!key) {
-			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 2, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
-			goto err;
-		}
-		data_type = EVP_PKEY_get0_type_name(key);
-		if (!data_type) {
-			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 5, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
-			goto err;
-		}
-		object_type = OSSL_OBJECT_PKEY;
+		key = (EVP_PKEY *)store_ctx->object_value;
 	}	
 
-	*p++ = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
-	*p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)data_type, 0);
+	*p++ = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &store_ctx->object_type);
+	*p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)store_ctx->data_type, 0);
 	if (key)
 		*p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_REFERENCE, key, sizeof(key));
 	else
@@ -798,33 +763,34 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 		} *cbdata = object_cbarg;
 
 		if (!cbdata) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 5, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
+			goto err;
+		}
+		if (store_ctx->info_type == OSSL_STORE_INFO_PKEY)
+			cbdata->v = OSSL_STORE_INFO_new_PKEY(key);
+		else if (store_ctx->info_type == OSSL_STORE_INFO_PUBKEY)
+			cbdata->v = OSSL_STORE_INFO_new_PUBKEY(key);
+		else {
 			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 6, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
 			goto err;
 		}
-		if (store_ctx->expected_type == OSSL_STORE_INFO_PKEY)
-			cbdata->v = OSSL_STORE_INFO_new_PKEY(key);
-		else if (store_ctx->expected_type == OSSL_STORE_INFO_PUBKEY)
-			cbdata->v = OSSL_STORE_INFO_new_PUBKEY(key);
-		else {
-			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 7, OPENSSL_LINE, OPENSSL_FUNC, store_ctx->uri);
-			goto err;
-		}
-
 	}
 	OPENSSL_free(data);
-	store_ctx->state = P11_STORE_CTX_STATE_LOADED;
+	store_ctx->object_value = NULL;
 	return 1;
 
 err:
-	store_ctx->state = P11_STORE_CTX_STATE_ERROR;
 	EVP_PKEY_free(key);
 	OPENSSL_free(data);
+	store_ctx->object_value = NULL;
 	return 0;
 }
 
 /*
  * Indicates if the end of the set of objects from the URI has been reached.
- * When that happens, there's no point trying to do any further loading.
+ * If no expected_type is provided, the store now sequentially attempts to fetch
+ * a private key, then a public key, and finally a certificate. This ensures that
+ * all object types are considered when expected_type is not explicitly defined.
  */
 static int store_eof(void *ctx)
 {
@@ -833,8 +799,55 @@ static int store_eof(void *ctx)
 	if (!store_ctx)
 		return 0;
 
-	return (store_ctx->state == P11_STORE_CTX_STATE_LOADED
-			|| store_ctx->state == P11_STORE_CTX_STATE_ERROR);
+	if (store_ctx->object_value != NULL)/* an object is ready to load */
+		return 0;
+
+	/* try fetching a private key */
+	if (store_ctx->types_tried == 0) {
+		store_ctx->types_tried++;
+		if (store_ctx->expected_type == 0 || store_ctx->expected_type == OSSL_STORE_INFO_PKEY) {
+			store_ctx->object_value = UTIL_CTX_get_privkey_from_uri(store_ctx->prov_ctx->util_ctx,
+				store_ctx->uri, store_ctx->ui_method, store_ctx->ui_data);
+			UTIL_CTX_set_ui_method(store_ctx->prov_ctx->util_ctx, store_ctx->ui_method, NULL);
+			if (store_ctx->object_value != NULL) {
+				store_ctx->data_type = EVP_PKEY_get0_type_name(store_ctx->object_value);
+				store_ctx->object_type = OSSL_OBJECT_PKEY;
+				store_ctx->info_type = OSSL_STORE_INFO_PKEY;
+				return 0;
+			}
+		}
+	}
+	/* try fetching a public key */
+	if (store_ctx->types_tried == 1) {
+		store_ctx->types_tried++;
+		if (store_ctx->expected_type == 0 || store_ctx->expected_type == OSSL_STORE_INFO_PUBKEY) {
+			store_ctx->object_value = UTIL_CTX_get_pubkey_from_uri(store_ctx->prov_ctx->util_ctx,
+				store_ctx->uri, store_ctx->ui_method, store_ctx->ui_data);
+			if (store_ctx->object_value != NULL) {
+				store_ctx->data_type = EVP_PKEY_get0_type_name(store_ctx->object_value);
+				store_ctx->object_type = OSSL_OBJECT_PKEY;
+				store_ctx->info_type = OSSL_STORE_INFO_PUBKEY;
+				return 0;
+			}
+		}
+	}
+	/* try fetching a certificate  */
+	if (store_ctx->types_tried == 2) {
+		store_ctx->types_tried++;
+		if (store_ctx->expected_type == 0 || store_ctx->expected_type ==  OSSL_STORE_INFO_CERT) {
+			store_ctx->object_value = UTIL_CTX_get_cert_from_uri(store_ctx->prov_ctx->util_ctx,
+				store_ctx->uri, store_ctx->ui_method, store_ctx->ui_data);
+			if (store_ctx->object_value != NULL) {
+				/* If we have a data type, it should be a PEM name */
+				store_ctx->data_type = "PEM_STRING_X509";
+				store_ctx->object_type = OSSL_OBJECT_CERT;
+				store_ctx->info_type = OSSL_STORE_INFO_CERT;
+				return 0;
+			}
+		}
+	}
+	/* could not fetch a new object */
+	return 1;
 }
 
 /*
