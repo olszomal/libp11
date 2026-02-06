@@ -342,6 +342,16 @@ extern PKCS11_CERT *PKCS11_find_certificate(PKCS11_KEY *);
 /* Find the corresponding key (if any) */
 extern PKCS11_KEY *PKCS11_find_key(PKCS11_CERT *);
 
+/**
+ * Returns a PKCS11_KEY object referencing the private key associated
+ * with the given EVP_PKEY.
+ *
+ * @param  pk  EVP_PKEY object referring to a PKCS#11 private key
+ * @retval !=NULL reference to the PKCS11_KEY object
+ * @retval NULL error or EVP_PKEY does not reference a private key
+ */
+extern PKCS11_KEY *PKCS11_get_pkcs11_key(const EVP_PKEY *pk);
+
 /* Get a list of all certificates associated with this token */
 extern int PKCS11_enumerate_certs(PKCS11_TOKEN *, PKCS11_CERT **, unsigned int *);
 

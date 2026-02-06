@@ -56,6 +56,14 @@ PROVIDER_FN(provider_gettable_params);
 PROVIDER_FN(provider_get_params);
 PROVIDER_FN(provider_query_operation);
 PROVIDER_FN(provider_get_reason_strings);
+PROVIDER_FN(keymgmt_new);
+PROVIDER_FN(keymgmt_load);
+PROVIDER_FN(keymgmt_free);
+PROVIDER_FN(keymgmt_has);
+PROVIDER_FN(keymgmt_match);
+PROVIDER_FN(keymgmt_query_operation_name);
+PROVIDER_FN(keymgmt_import);
+PROVIDER_FN(keymgmt_import_types);
 PROVIDER_FN(store_open);
 PROVIDER_FN(store_settable_ctx_params);
 PROVIDER_FN(store_set_ctx_params);
@@ -77,6 +85,18 @@ static const OSSL_DISPATCH provider_functions[] = {
 	OSSL_DISPATCH_END
 };
 
+static const OSSL_DISPATCH keymgmt_functions[] = {
+	{OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))keymgmt_new},
+	{OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))keymgmt_load},
+	{OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))keymgmt_free},
+	{OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))keymgmt_has},
+	{OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))keymgmt_match},
+	{OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))keymgmt_query_operation_name},
+	{OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))keymgmt_import},
+	{OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))keymgmt_import_types},
+	OSSL_DISPATCH_END
+};
+
 static const OSSL_DISPATCH store_functions[] = {
 	{OSSL_FUNC_STORE_OPEN, (void (*)(void))store_open},
 	{OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS, (void (*)(void))store_settable_ctx_params},
@@ -85,6 +105,14 @@ static const OSSL_DISPATCH store_functions[] = {
 	{OSSL_FUNC_STORE_EOF, (void (*)(void))store_eof},
 	{OSSL_FUNC_STORE_CLOSE, (void (*)(void))store_close},
 	OSSL_DISPATCH_END
+};
+
+static const OSSL_ALGORITHM p11_keymgmts[] = {
+	{"RSA", "provider=pkcs11", keymgmt_functions, "PKCS#11 keymgm functions"},
+	{"EC", "provider=pkcs11", keymgmt_functions, "PKCS#11 keymgm functions"},
+	{"ED25519", "provider=pkcs11", keymgmt_functions, "PKCS#11 keymgm functions"},
+	{"ED448", "provider=pkcs11", keymgmt_functions, "PKCS#11 keymgm functions"},
+	{NULL, NULL, NULL, NULL}
 };
 
 static const OSSL_ALGORITHM p11_storemgmt[] = {
@@ -297,6 +325,40 @@ static int PROVIDER_CTX_set_parameters(PROVIDER_CTX *prov_ctx)
 		UTIL_CTX_set_force_login(prov_ctx->util_ctx, 1);
 	}
 	return 1;
+}
+
+static const char *pkey_name_from_evp_pkey(const EVP_PKEY *pkey)
+{
+	if (pkey == NULL)
+		return NULL;
+
+	switch (EVP_PKEY_base_id(pkey)) {
+	case EVP_PKEY_RSA:
+		return "RSA";
+	case EVP_PKEY_EC:
+		return "EC";
+	case EVP_PKEY_ED25519:
+		return "ED25519";
+	case EVP_PKEY_ED448:
+		return "ED448";
+	default:
+		return NULL;
+	}
+}
+
+static const char *pkey_name_from_ossl_param(const OSSL_PARAM *params)
+{
+	if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_GROUP_NAME) ||
+		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY) ||
+		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_EC_ENCODING) ||
+		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT)) {
+		return "EC";
+	}
+	if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_N) ||
+		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_E)) {
+		return "RSA";
+	}
+	return NULL;
 }
 
 /******************************************************************************/
@@ -553,7 +615,10 @@ static const OSSL_ALGORITHM *provider_query_operation(void *ctx,
 {
 	(void)ctx;
 	*no_store = 0;
-	if (operation_id == OSSL_OP_STORE) {
+	switch (operation_id) {
+	case OSSL_OP_KEYMGMT:
+		return p11_keymgmts;
+	case OSSL_OP_STORE:
 		return p11_storemgmt;
 	}
 	return NULL;
@@ -578,6 +643,134 @@ static const OSSL_ITEM *provider_get_reason_strings(void *ctx)
 	return reason_strings;
 }
 
+/******************************************************************************/
+/* KEYMGMT functions                                                          */
+/******************************************************************************/
+
+static void *keymgmt_new(void *provctx)
+{
+	(void)provctx;
+	return EVP_PKEY_new();
+}
+
+static void *keymgmt_load(const void *reference, size_t reference_sz)
+{
+	EVP_PKEY *provkey;
+
+	if (reference_sz != sizeof(provkey))
+		return NULL;
+
+	/* The contents of the reference is the address to our object */
+	provkey = *(EVP_PKEY **)reference;
+
+	/* We grabbed, so we detach it */
+	*(EVP_PKEY **)reference = NULL;
+
+	return provkey;
+}
+
+static void keymgmt_free(void *keydata)
+{
+	EVP_PKEY_free((EVP_PKEY *)keydata);
+}
+
+static int keymgmt_has(const void *keydata, int selection)
+{
+	const EVP_PKEY *provkey = (EVP_PKEY *)keydata;
+
+	if (provkey == NULL)
+		return 0;
+
+	if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)
+		return UTIL_CTX_is_private_key(provkey);
+
+	/* We always return OK when asked for a PUBLIC KEY, even if we only have
+	 * a private key, as we can try to fetch the associated public key */
+	if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)
+		return 1;
+
+	return 0; /* Unsupported selection */
+}
+
+static int keymgmt_match(const void *keydata1, const void *keydata2, int selection)
+{
+	const EVP_PKEY *provkey1 = (EVP_PKEY *)keydata1;
+	const EVP_PKEY *provkey2 = (EVP_PKEY *)keydata2;
+	int ok = 1;
+
+	if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS)
+		ok = ok && provkey1 != NULL && provkey2 != NULL;
+
+	if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+		/* Match public key material first. Private key comparison is
+		 * used only as a fallback when public key data is unavailable,
+		 * avoidingredundant checks (e.g. EC group) */
+		int key_checked = 0;
+
+		if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+			/* validate whether the public keys match */
+			key_checked = UTIL_CTX_public_match(provkey1, provkey2);
+		}
+		if (!key_checked && (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)) {
+			/* validate whether the private keys match */
+			key_checked = UTIL_CTX_private_match(provkey1, provkey2);
+		}
+		ok = ok && key_checked;
+	}
+	return ok;
+}
+
+static const char *keymgmt_query_operation_name(int id)
+{
+	switch (id) {
+	case OSSL_OP_SIGNATURE:
+	case OSSL_OP_ASYM_CIPHER: /* rsa-oaep-prov.c */
+		return "PKCS11";
+	}
+	return NULL;
+}
+
+static int keymgmt_import(void *keydata, int selection, const OSSL_PARAM *params)
+{
+	EVP_PKEY *provkey = (EVP_PKEY *)keydata;
+	EVP_PKEY_CTX *ctx = NULL;
+	const char *pkey_name;
+	int type;
+
+	if (provkey == NULL || params == NULL)
+		return 0;
+
+	pkey_name = pkey_name_from_ossl_param(params);
+	if (pkey_name == NULL)
+		return 0;
+
+	if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)
+		type = EVP_PKEY_KEYPAIR;
+	else if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)
+		type = EVP_PKEY_PUBLIC_KEY;
+	else if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS)
+		type = EVP_PKEY_KEY_PARAMETERS;
+	else
+		return 0;
+
+	ctx = EVP_PKEY_CTX_new_from_name(NULL, pkey_name, NULL);
+	if (ctx == NULL)
+		return 0;
+
+	if (EVP_PKEY_fromdata_init(ctx) <= 0 ||
+		EVP_PKEY_fromdata(ctx, &provkey, type, (OSSL_PARAM *)params) <= 0) {
+		EVP_PKEY_CTX_free(ctx);
+		return 0;
+	}
+	EVP_PKEY_CTX_free(ctx);
+	return 1;
+}
+
+static const OSSL_PARAM *keymgmt_import_types(int selection)
+{
+	(void)selection;
+	return NULL;
+}
 
 /******************************************************************************/
 /* Store functions                                                            */
@@ -671,10 +864,6 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 	UI_METHOD *ui_method;
 	void *ui_data;
 	PASSPHRASE_DATA *pass_data = (PASSPHRASE_DATA *)pw_cbarg;
-	struct ossl_load_result_data_st {
-		OSSL_STORE_INFO *v; /* to be filled in */
-		OSSL_STORE_CTX *store_ctx;
-	} *cbdata = object_cbarg;
 
 	(void)pw_cb;
 
@@ -746,9 +935,24 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 				store_ctx->uri, ui_method, ui_data);
 
 			if (key != NULL) {
-				/* Workaround for EVP_PKEY without key management, needed since
-				 * ossl_store_handle_load_result() doesn't support this case. */
-				cbdata->v = OSSL_STORE_INFO_new_PUBKEY(key);
+				const char *data_type = pkey_name_from_evp_pkey(key);
+				int object_type = OSSL_OBJECT_PKEY;
+				OSSL_PARAM params[4], *p = params;
+				
+				if (!data_type)
+					return 0;
+
+				*p++ = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
+				*p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)data_type, 0);
+				*p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_REFERENCE, &key, sizeof(key));
+				*p = OSSL_PARAM_construct_end();
+
+				if (!object_cb(params, object_cbarg)) {
+					/* callback failed */
+					PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 5, OPENSSL_LINE, OPENSSL_FUNC, "%s", store_ctx->uri);
+					return 0;
+				}
+				OPENSSL_free(key);
 				return 1;
 			}
 		}
@@ -762,9 +966,24 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 
 			UTIL_CTX_set_ui_method(store_ctx->prov_ctx->util_ctx, ui_method, NULL);
 			if (key != NULL) {
-				/* Workaround for EVP_PKEY without key management, needed since
-				 * ossl_store_handle_load_result() doesn't support this case. */
-				cbdata->v = OSSL_STORE_INFO_new_PKEY(key);
+				const char *data_type = pkey_name_from_evp_pkey(key);
+				int object_type = OSSL_OBJECT_PKEY;
+				OSSL_PARAM params[4], *p = params;
+				
+				if (!data_type)
+					return 0;
+
+				*p++ = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
+				*p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)data_type, 0);
+				*p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_REFERENCE, &key, sizeof(key));
+				*p = OSSL_PARAM_construct_end();
+
+				if (!object_cb(params, object_cbarg)) {
+					/* callback failed */
+					PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 5, OPENSSL_LINE, OPENSSL_FUNC, "%s", store_ctx->uri);
+					return 0;
+				}
+				OPENSSL_free(key);
 				return 1;
 			}
 		}

@@ -80,6 +80,9 @@ EVP_PKEY *UTIL_CTX_get_privkey_from_uri(UTIL_CTX *ctx, const char *uri,
 	UI_METHOD *ui_method, void *ui_data);
 
 int UTIL_CTX_keygen(UTIL_CTX *ctx, PKCS11_KGEN_ATTRS *kg_attrs);
+int UTIL_CTX_is_private_key(const EVP_PKEY *pkey);
+int UTIL_CTX_public_match(const EVP_PKEY *pkey1, const EVP_PKEY *pkey2);
+int UTIL_CTX_private_match(const EVP_PKEY *pkey1, const EVP_PKEY *pkey2);
 
 #endif /* _UTIL_LIBP11_H */
 
