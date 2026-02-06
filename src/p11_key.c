@@ -44,6 +44,8 @@ static const unsigned char STR_ED448[] = {
 # endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 #endif /* OPENSSL_NO_EC */
 
+static int pkey_ex_index = 0;
+
 static int pkcs11_find_keys(PKCS11_SLOT_private *, CK_SESSION_HANDLE, unsigned int,
 	PKCS11_TEMPLATE *);
 static int pkcs11_init_key(PKCS11_SLOT_private *, CK_SESSION_HANDLE session,
@@ -57,6 +59,35 @@ static void pkcs11_common_pubkey_attr(PKCS11_TEMPLATE *, const char *,
 	const unsigned char *, size_t);
 static void pkcs11_common_privkey_attr(PKCS11_TEMPLATE *, const char *,
 	const unsigned char *, size_t, const PKCS11_params *);
+
+static void alloc_pkey_ex_index(void)
+{
+	if (pkey_ex_index == 0) {
+		while (pkey_ex_index == 0) /* Workaround for OpenSSL RT3710 */
+			pkey_ex_index = EVP_PKEY_get_ex_new_index(0, "libp11 EVP_PKEY",
+				NULL, NULL, NULL);
+		if (pkey_ex_index < 0)
+			pkey_ex_index = 0; /* Fallback to app_data */
+	}
+}
+
+static void free_pkey_ex_index(void)
+{
+	if (pkey_ex_index > 0) {
+		CRYPTO_free_ex_index(CRYPTO_EX_INDEX_EVP_PKEY, pkey_ex_index);
+		pkey_ex_index = 0;
+	}
+}
+
+static void pkcs11_set_ex_data_evp_pkey(EVP_PKEY *pkey, PKCS11_KEY *key)
+{
+	EVP_PKEY_set_ex_data(pkey, pkey_ex_index, key);
+}
+
+static PKCS11_KEY *pkcs11_get_ex_data_evp_pkey(const EVP_PKEY *pkey)
+{
+	return EVP_PKEY_get_ex_data(pkey, pkey_ex_index);
+}
 
 /* Helper to acquire object handle from given template */
 static CK_OBJECT_HANDLE pkcs11_handle_from_template(PKCS11_SLOT_private *slot,
@@ -708,10 +739,19 @@ EVP_PKEY *pkcs11_get_key(PKCS11_OBJECT_private *key0, CK_OBJECT_CLASS object_cla
 	default:
 		pkcs11_log(key0->slot->ctx, LOG_DEBUG, "Unsupported key type\n");
 	}
+	alloc_pkey_ex_index();
+	pkcs11_set_ex_data_evp_pkey(ret, key->public);
+
 err:
 	if (key != key0)
 		pkcs11_object_free(key);
 	return ret;
+}
+
+/* Returns the PKCS11_KEY handle associated with the given EVP_PKEY */
+PKCS11_KEY *pkcs11_get_pkcs11_key(const EVP_PKEY *pk)
+{
+	return pkcs11_get_ex_data_evp_pkey(pk);
 }
 
 /*
@@ -912,6 +952,9 @@ static int pkcs11_init_key(PKCS11_SLOT_private *slot, CK_SESSION_HANDLE session,
 	key->label = kpriv->label;
 	key->isPrivate = (type == CKO_PRIVATE_KEY);
 
+	/* Link back */
+	kpriv->public = key;
+
 	if (ret)
 		*ret = key;
 	return 0;
@@ -981,6 +1024,7 @@ void pkcs11_destroy_keys(PKCS11_SLOT_private *slot, unsigned int type)
 		OPENSSL_free(keys->keys);
 	keys->keys = NULL;
 	keys->num = 0;
+	free_pkey_ex_index();
 }
 
 /* vim: set noexpandtab: */

@@ -279,6 +279,15 @@ PKCS11_KEY *PKCS11_find_key(PKCS11_CERT *pcert)
 	return pkcs11_find_key(cert);
 }
 
+PKCS11_KEY *PKCS11_get_pkcs11_key(const EVP_PKEY *pk)
+{
+	PKCS11_KEY *pkey = pkcs11_get_pkcs11_key(pk);
+	PKCS11_OBJECT_private *key = PRIVKEY(pkey);
+	if (check_object_fork(key) < 0)
+		return NULL;
+	return pkey;
+}
+
 int PKCS11_enumerate_certs_ext(PKCS11_TOKEN *token, const PKCS11_CERT *cert_template,
 		PKCS11_CERT **certs, unsigned int *ncerts)
 {
