@@ -348,15 +348,36 @@ static const char *pkey_name_from_evp_pkey(const EVP_PKEY *pkey)
 
 static const char *pkey_name_from_ossl_param(const OSSL_PARAM *params)
 {
+	/* EC keys */
 	if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_GROUP_NAME) ||
 		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY) ||
 		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_EC_ENCODING) ||
 		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT)) {
 		return "EC";
 	}
+
+	/* RSA keys */
 	if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_N) ||
 		OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_E)) {
 		return "RSA";
+	}
+
+	/* Ed25519 / Ed448 */
+	if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST)) {
+		const OSSL_PARAM *p;
+
+		p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+		if (p != NULL && p->data_type == OSSL_PARAM_OCTET_STRING) {
+			if (p->data_size == 32) return "ED25519";
+			if (p->data_size == 57) return "ED448";
+		}
+		p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
+		if (p != NULL && p->data_type == OSSL_PARAM_OCTET_STRING) {
+			if (p->data_size == 32) return "ED25519";
+			if (p->data_size == 57) return "ED448";
+		}
+		/* fallback: we know it's EdDSA, but can't tell which */
+		return NULL;
 	}
 	return NULL;
 }
