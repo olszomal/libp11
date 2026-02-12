@@ -29,6 +29,19 @@
 static int rsa_ex_index = 0;
 static RSA_METHOD *pkcs11_rsa_method = NULL;
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
+static EVP_PKEY_METHOD *pkcs11_pkey_rsa_method  = NULL;
+
+static int (*orig_pkey_rsa_sign_init) (EVP_PKEY_CTX *ctx);
+static int (*orig_pkey_rsa_sign) (EVP_PKEY_CTX *ctx,
+	unsigned char *sig, size_t *siglen,
+	const unsigned char *tbs, size_t tbslen);
+static int (*orig_pkey_rsa_decrypt_init) (EVP_PKEY_CTX *ctx);
+static int (*orig_pkey_rsa_decrypt) (EVP_PKEY_CTX *ctx,
+	unsigned char *out, size_t *outlen,
+	const unsigned char *in, size_t inlen);
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
+
 static RSA *pkcs11_get1_rsa(PKCS11_OBJECT_private *key)
 {
 	EVP_PKEY *evp_key = pkcs11_get_key(key, key->object_class);
@@ -287,6 +300,93 @@ void pkcs11_set_ex_data_rsa(RSA *rsa, PKCS11_OBJECT_private *key)
 	RSA_set_ex_data(rsa, rsa_ex_index, key);
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
+
+static int pkcs11_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *sig, size_t *siglen,
+		const unsigned char *tbs, size_t tbslen)
+{
+	int ret;
+
+	ret = pkcs11_try_pkey_rsa_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	if (ret < 0)
+		ret = (*orig_pkey_rsa_sign)(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	return ret;
+}
+
+static int pkcs11_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *out, size_t *outlen,
+		const unsigned char *in, size_t inlen)
+{
+	int ret;
+
+	ret = pkcs11_try_pkey_rsa_decrypt(evp_pkey_ctx, out, outlen, in, inlen);
+	if (ret < 0)
+		ret = (*orig_pkey_rsa_decrypt)(evp_pkey_ctx, out, outlen, in, inlen);
+	return ret;
+}
+
+/* Global initialize RSA EVP_PKEY_METHOD */
+static int pkcs11_pkey_rsa_method_new(void)
+{
+	const EVP_PKEY_METHOD *orig_rsa_method = NULL;
+	int orig_id;
+
+	if (pkcs11_pkey_rsa_method)
+		return 1; /* EVP_PKEY_RSA method already initialized */
+
+	orig_rsa_method = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(EVP_PKEY_RSA);
+	if (!orig_rsa_method)
+		return 0;
+
+	EVP_PKEY_meth_get0_info(&orig_id, NULL, orig_rsa_method);
+	if (orig_id != EVP_PKEY_RSA)
+		return 0;
+
+	EVP_PKEY_meth_get_sign(orig_rsa_method,
+		&orig_pkey_rsa_sign_init, &orig_pkey_rsa_sign);
+	if (!orig_pkey_rsa_sign)
+		return 0;
+
+	EVP_PKEY_meth_get_decrypt(orig_rsa_method,
+		&orig_pkey_rsa_decrypt_init, &orig_pkey_rsa_decrypt);
+	if (!orig_pkey_rsa_decrypt)
+		return 0;
+
+	pkcs11_pkey_rsa_method = EVP_PKEY_meth_new(EVP_PKEY_RSA, EVP_PKEY_FLAG_AUTOARGLEN);
+	if (!pkcs11_pkey_rsa_method)
+		return 0;
+
+	/* Duplicate the original method */
+	EVP_PKEY_meth_copy(pkcs11_pkey_rsa_method, orig_rsa_method);
+
+	EVP_PKEY_meth_set_sign(pkcs11_pkey_rsa_method,
+		orig_pkey_rsa_sign_init, pkcs11_pkey_rsa_sign);
+	EVP_PKEY_meth_set_decrypt(pkcs11_pkey_rsa_method,
+		orig_pkey_rsa_decrypt_init, pkcs11_pkey_rsa_decrypt);
+
+	/* Register the method globally */
+	if (!EVP_PKEY_meth_add0(pkcs11_pkey_rsa_method)) {
+		EVP_PKEY_meth_free(pkcs11_pkey_rsa_method);
+		pkcs11_pkey_rsa_method = NULL;
+		return 0;
+	}
+	return 1;
+}
+
+void pkcs11_rsa_key_method_free(void)
+{
+	if (pkcs11_global_data_refs == 0 && pkcs11_pkey_rsa_method) {
+		free_pkey_ex_index();
+		EVP_PKEY_meth_remove(pkcs11_pkey_rsa_method);
+		EVP_PKEY_meth_free(pkcs11_pkey_rsa_method);
+		pkcs11_pkey_rsa_method = NULL;
+	}
+}
+
+
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
+
 /*
  * Build an EVP_PKEY object
  */
@@ -304,8 +404,23 @@ static EVP_PKEY *pkcs11_get_evp_key_rsa(PKCS11_OBJECT_private *key)
 		return NULL;
 	}
 	if (key->object_class == CKO_PRIVATE_KEY) {
-		/* This creates a new RSA_KEY object which requires its own key object reference */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
+		/* global initialize RSA EVP_PKEY_METHOD */
+		if (!pkcs11_pkey_rsa_method_new()) {
+			EVP_PKEY_free(pk);
+			return NULL;
+		}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
+
+		/* creates a new EVP_PKEY object which requires its own key object reference */
 		key = pkcs11_object_ref(key);
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
+		alloc_pkey_ex_index();
+		pkcs11_set_ex_data_pkey(pk, key);
+		atexit(pkcs11_rsa_key_method_free);
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
+
 		RSA_set_method(rsa, PKCS11_get_rsa_method());
 #if OPENSSL_VERSION_NUMBER >= 0x10100005L || ( defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER >= 0x3050000fL )
 		RSA_set_flags(rsa, RSA_FLAG_EXT_PKEY);
