@@ -22,16 +22,6 @@
 #include <string.h>
 
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
-
-static int (*orig_pkey_rsa_sign_init) (EVP_PKEY_CTX *ctx);
-static int (*orig_pkey_rsa_sign) (EVP_PKEY_CTX *ctx,
-	unsigned char *sig, size_t *siglen,
-	const unsigned char *tbs, size_t tbslen);
-static int (*orig_pkey_rsa_decrypt_init) (EVP_PKEY_CTX *ctx);
-static int (*orig_pkey_rsa_decrypt) (EVP_PKEY_CTX *ctx,
-	unsigned char *out, size_t *outlen,
-	const unsigned char *in, size_t inlen);
-
 # ifndef OPENSSL_NO_EC
 static int (*orig_pkey_ec_sign_init) (EVP_PKEY_CTX *ctx);
 static int (*orig_pkey_ec_sign) (EVP_PKEY_CTX *ctx,
@@ -155,55 +145,6 @@ static void EVP_PKEY_meth_get_decrypt(EVP_PKEY_METHOD *pmeth,
 #endif
 
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
-
-static int pkcs11_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
-		unsigned char *sig, size_t *siglen,
-		const unsigned char *tbs, size_t tbslen)
-{
-	int ret;
-
-	ret = pkcs11_try_pkey_rsa_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
-	if (ret < 0)
-		ret = (*orig_pkey_rsa_sign)(evp_pkey_ctx, sig, siglen, tbs, tbslen);
-	return ret;
-}
-
-static int pkcs11_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
-		unsigned char *out, size_t *outlen,
-		const unsigned char *in, size_t inlen)
-{
-	int ret;
-
-	ret = pkcs11_try_pkey_rsa_decrypt(evp_pkey_ctx, out, outlen, in, inlen);
-	if (ret < 0)
-		ret = (*orig_pkey_rsa_decrypt)(evp_pkey_ctx, out, outlen, in, inlen);
-	return ret;
-}
-
-static EVP_PKEY_METHOD *pkcs11_pkey_method_rsa(void)
-{
-	EVP_PKEY_METHOD *orig_meth, *new_meth;
-
-	orig_meth = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(EVP_PKEY_RSA);
-	EVP_PKEY_meth_get_sign(orig_meth,
-		&orig_pkey_rsa_sign_init, &orig_pkey_rsa_sign);
-	EVP_PKEY_meth_get_decrypt(orig_meth,
-		&orig_pkey_rsa_decrypt_init,
-		&orig_pkey_rsa_decrypt);
-
-	new_meth = EVP_PKEY_meth_new(EVP_PKEY_RSA,
-		EVP_PKEY_FLAG_AUTOARGLEN);
-
-	EVP_PKEY_meth_copy(new_meth, orig_meth);
-
-	EVP_PKEY_meth_set_sign(new_meth,
-		orig_pkey_rsa_sign_init, pkcs11_pkey_rsa_sign);
-	EVP_PKEY_meth_set_decrypt(new_meth,
-		orig_pkey_rsa_decrypt_init, pkcs11_pkey_rsa_decrypt);
-
-	return new_meth;
-}
-
 #ifndef OPENSSL_NO_EC
 
 static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,

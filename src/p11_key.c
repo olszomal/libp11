@@ -26,9 +26,24 @@
 /* The maximum length of PIN */
 #define MAX_PIN_LENGTH   256
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#if OPENSSL_VERSION_NUMBER < 0x40000000L
+# if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static int pkey_ex_index = 0;
+# endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L*/
 
+const EVP_PKEY_METHOD *orig_method_rsa = NULL;
+
+static int (*orig_pkey_rsa_sign_init) (EVP_PKEY_CTX *ctx);
+static int (*orig_pkey_rsa_sign) (EVP_PKEY_CTX *ctx,
+	unsigned char *sig, size_t *siglen,
+	const unsigned char *tbs, size_t tbslen);
+static int (*orig_pkey_rsa_decrypt_init) (EVP_PKEY_CTX *ctx);
+static int (*orig_pkey_rsa_decrypt) (EVP_PKEY_CTX *ctx,
+	unsigned char *out, size_t *outlen,
+	const unsigned char *in, size_t inlen);
+#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 # ifndef OPENSSL_NO_EC
 /* DER OIDs */
 static const unsigned char OID_ED25519[] = { 0x06, 0x03, 0x2B, 0x65, 0x70 };
@@ -985,6 +1000,7 @@ void pkcs11_destroy_keys(PKCS11_SLOT_private *slot, unsigned int type)
 	keys->num = 0;
 }
 
+#if OPENSSL_VERSION_NUMBER < 0x40000000L
 # if OPENSSL_VERSION_NUMBER >= 0x30000000L
 void pkcs11_set_ex_data_pkey(EVP_PKEY *pkey, PKCS11_OBJECT_private *key)
 {
@@ -1142,7 +1158,8 @@ static int pkcs11_params_oaep(CK_RSA_PKCS_OAEP_PARAMS *oaep,
 	return 0;
 }
 
-int pkcs11_try_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
+/* Attempt to sign using the PKCS#11-backed RSA implementation */
+static int pkcs11_try_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		unsigned char *sig, size_t *siglen,
 		const unsigned char *tbs, size_t tbslen)
 {
@@ -1233,7 +1250,8 @@ int pkcs11_try_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 	return 1;
 }
 
-int pkcs11_try_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
+/* Attempt to decrypt using the PKCS#11-backed RSA implementation */
+static int pkcs11_try_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
 		unsigned char *out, size_t *outlen,
 		const unsigned char *in, size_t inlen)
 {
@@ -1323,5 +1341,71 @@ int pkcs11_try_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
 	*outlen = size;
 	return 1;
 }
+
+static int pkcs11_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *sig, size_t *siglen,
+		const unsigned char *tbs, size_t tbslen)
+{
+	int ret;
+
+	ret = pkcs11_try_pkey_rsa_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	if (ret < 0)
+		ret = (*orig_pkey_rsa_sign)(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	return ret;
+}
+
+static int pkcs11_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *out, size_t *outlen,
+		const unsigned char *in, size_t inlen)
+{
+	int ret;
+
+	ret = pkcs11_try_pkey_rsa_decrypt(evp_pkey_ctx, out, outlen, in, inlen);
+	if (ret < 0)
+		ret = (*orig_pkey_rsa_decrypt)(evp_pkey_ctx, out, outlen, in, inlen);
+	return ret;
+}
+
+EVP_PKEY_METHOD *pkcs11_pkey_method_rsa(void)
+{
+	EVP_PKEY_METHOD *new_meth_rsa = NULL;
+	int orig_id;
+
+	/* Cache the original EVP_PKEY_RSA method (once) */
+	if (!orig_method_rsa)
+		orig_method_rsa = EVP_PKEY_meth_find(EVP_PKEY_RSA);
+
+	if (!orig_method_rsa)
+		return NULL;
+
+	EVP_PKEY_meth_get0_info(&orig_id, NULL, orig_method_rsa);
+	if (orig_id != EVP_PKEY_RSA)
+		return NULL;
+
+	EVP_PKEY_meth_get_sign(orig_method_rsa,
+		&orig_pkey_rsa_sign_init, &orig_pkey_rsa_sign);
+	if (!orig_pkey_rsa_sign)
+		return NULL;
+
+	EVP_PKEY_meth_get_decrypt(orig_method_rsa,
+		&orig_pkey_rsa_decrypt_init, &orig_pkey_rsa_decrypt);
+	if (!orig_pkey_rsa_decrypt)
+		return NULL;
+
+	new_meth_rsa = EVP_PKEY_meth_new(EVP_PKEY_RSA, EVP_PKEY_FLAG_AUTOARGLEN);
+	if (!new_meth_rsa)
+		return NULL;
+
+	/* Duplicate the original method */
+	EVP_PKEY_meth_copy(new_meth_rsa, orig_method_rsa);
+
+	EVP_PKEY_meth_set_sign(new_meth_rsa,
+		orig_pkey_rsa_sign_init, pkcs11_pkey_rsa_sign);
+	EVP_PKEY_meth_set_decrypt(new_meth_rsa,
+		orig_pkey_rsa_decrypt_init, pkcs11_pkey_rsa_decrypt);
+
+	return new_meth_rsa;
+}
+#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
 
 /* vim: set noexpandtab: */

@@ -439,15 +439,10 @@ extern void pkcs11_ed_key_method_free(void);
 extern void pkcs11_rsa_key_method_free(void);
 # endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
 
+#if OPENSSL_VERSION_NUMBER < 0x40000000L
 /* Attempt to sign using the PKCS#11-backed RSA implementation */
-extern int pkcs11_try_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
-		unsigned char *sig, size_t *siglen,
-		const unsigned char *tbs, size_t tbslen);
-
-/* Attempt to decrypt using the PKCS#11-backed RSA implementation */
-extern int pkcs11_try_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
-		unsigned char *out, size_t *outlen,
-		const unsigned char *in, size_t inlen);
+extern EVP_PKEY_METHOD *pkcs11_pkey_method_rsa(void);
+#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
 
 #endif /* _LIBP11_INT_H */
 
