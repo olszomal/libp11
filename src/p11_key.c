@@ -26,6 +26,10 @@
 /* The maximum length of PIN */
 #define MAX_PIN_LENGTH   256
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static int evp_pkey_ex_index = 0;
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
+
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
 # if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static int pkey_ex_index = 0;
@@ -119,6 +123,13 @@ static void pkcs11_common_pubkey_attr(PKCS11_TEMPLATE *, const char *,
 	const unsigned char *, size_t);
 static void pkcs11_common_privkey_attr(PKCS11_TEMPLATE *, const char *,
 	const unsigned char *, size_t, const PKCS11_params *);
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static void pkcs11_set_ex_data_evp_pkey(EVP_PKEY *pkey, PKCS11_KEY *key);
+static PKCS11_KEY *pkcs11_get_ex_data_evp_pkey(const EVP_PKEY *pkey);
+static void alloc_evp_pkey_ex_index(void);
+static void free_evp_pkey_ex_index(void);
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /* Helper to acquire object handle from given template */
 static CK_OBJECT_HANDLE pkcs11_handle_from_template(PKCS11_SLOT_private *slot,
@@ -770,11 +781,23 @@ EVP_PKEY *pkcs11_get_key(PKCS11_OBJECT_private *key0, CK_OBJECT_CLASS object_cla
 	default:
 		pkcs11_log(key0->slot->ctx, LOG_DEBUG, "Unsupported key type\n");
 	}
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	alloc_evp_pkey_ex_index();
+	pkcs11_set_ex_data_evp_pkey(ret, key->public);
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 err:
 	if (key != key0)
 		pkcs11_object_free(key);
 	return ret;
 }
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+/* Returns the PKCS11_KEY handle associated with the given EVP_PKEY */
+PKCS11_KEY *pkcs11_get_pkcs11_key(const EVP_PKEY *pk)
+{
+	return pkcs11_get_ex_data_evp_pkey(pk);
+}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /*
  * Authenticate a private the key operation if needed
@@ -974,6 +997,9 @@ static int pkcs11_init_key(PKCS11_SLOT_private *slot, CK_SESSION_HANDLE session,
 	key->label = kpriv->label;
 	key->isPrivate = (type == CKO_PRIVATE_KEY);
 
+	/* Link back */
+	kpriv->public = key;
+
 	if (ret)
 		*ret = key;
 	return 0;
@@ -1045,6 +1071,37 @@ void pkcs11_destroy_keys(PKCS11_SLOT_private *slot, unsigned int type)
 	keys->num = 0;
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static void pkcs11_set_ex_data_evp_pkey(EVP_PKEY *pkey, PKCS11_KEY *key)
+{
+	EVP_PKEY_set_ex_data(pkey, evp_pkey_ex_index, key);
+}
+
+static PKCS11_KEY *pkcs11_get_ex_data_evp_pkey(const EVP_PKEY *pkey)
+{
+	return EVP_PKEY_get_ex_data(pkey, evp_pkey_ex_index);
+}
+
+static void alloc_evp_pkey_ex_index(void)
+{
+	if (evp_pkey_ex_index == 0) {
+		while (evp_pkey_ex_index == 0) /* Workaround for OpenSSL RT3710 */
+			evp_pkey_ex_index = EVP_PKEY_get_ex_new_index(0, "libp11 EVP_PKEY",
+				NULL, NULL, NULL);
+		if (evp_pkey_ex_index < 0)
+			evp_pkey_ex_index = 0; /* Fallback to app_data */
+	}
+}
+
+static void free_evp_pkey_ex_index(void)
+{
+	if (evp_pkey_ex_index > 0) {
+		CRYPTO_free_ex_index(CRYPTO_EX_INDEX_EVP_PKEY, evp_pkey_ex_index);
+		evp_pkey_ex_index = 0;
+	}
+}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
+
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
 # if OPENSSL_VERSION_NUMBER >= 0x30000000L
 void pkcs11_set_ex_data_pkey(EVP_PKEY *pkey, PKCS11_OBJECT_private *key)
@@ -1061,7 +1118,7 @@ void alloc_pkey_ex_index(void)
 {
 	if (pkey_ex_index == 0) {
 		while (pkey_ex_index == 0) /* Workaround for OpenSSL RT3710 */
-			pkey_ex_index = EVP_PKEY_get_ex_new_index(0, "libp11 EVP_PKEY",
+			pkey_ex_index = EVP_PKEY_get_ex_new_index(0, "libp11 PKCS11_KEY",
 				NULL, NULL, NULL);
 		if (pkey_ex_index < 0)
 			pkey_ex_index = 0; /* Fallback to app_data */

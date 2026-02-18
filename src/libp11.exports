@@ -26,6 +26,7 @@ PKCS11_get_public_key
 PKCS11_get_slotid_from_slot
 PKCS11_find_certificate
 PKCS11_find_key
+PKCS11_get_pkcs11_key
 PKCS11_enumerate_certs
 PKCS11_enumerate_certs_ext
 PKCS11_remove_certificate

@@ -111,6 +111,7 @@ struct pkcs11_object_private {
 	unsigned int forkid;
 	int refcnt;
 	pthread_mutex_t lock;
+	PKCS11_KEY *public; /* our current public object */
 };
 #define PRIVKEY(_key)		((PKCS11_OBJECT_private *) (_key)->_private)
 #define PRIVCERT(_cert)		((PKCS11_OBJECT_private *) (_cert)->_private)
@@ -303,6 +304,11 @@ extern PKCS11_CERT *pkcs11_find_certificate(PKCS11_OBJECT_private *key);
 
 /* Find the corresponding key (if any) */
 extern PKCS11_KEY *pkcs11_find_key(PKCS11_OBJECT_private *cert);
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+/* Return the PKCS11_KEY handle associated with the given EVP_PKEY */
+extern PKCS11_KEY *pkcs11_get_pkcs11_key(const EVP_PKEY *pk);
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /* Get a list of all certificates matching with template associated with this token */
 extern int pkcs11_enumerate_certs(PKCS11_SLOT_private *,

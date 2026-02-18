@@ -37,6 +37,8 @@
 #include <strings.h>
 #endif
 
+#include <openssl/core_names.h>
+
 /* switch to legacy call if get0 variant is not available */
 #ifndef HAVE_X509_GET0_NOTBEFORE
 #	define X509_get0_notBefore X509_get_notBefore
@@ -375,6 +377,162 @@ static int hex_to_bin(UTIL_CTX *ctx,
 	*outlen = count;
 	return 1;
 }
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+/*
+ * Compare two EVP_PKEY parameters represented as BIGNUMs.
+ * The parameter identified by |name| is retrieved from both keys and
+ * compared using BN_cmp().
+ * Returns 1 if the parameters exist in both keys and are equal, 0 otherwise.
+ */
+static int bn_equal_param(const EVP_PKEY *a, const EVP_PKEY *b, const char *name)
+{
+	BIGNUM *ba = NULL, *bb = NULL;
+	int ok = 0;
+
+	if (EVP_PKEY_get_bn_param(a, name, &ba) != 1 || ba == NULL)
+		goto end;
+	if (EVP_PKEY_get_bn_param(b, name, &bb) != 1 || bb == NULL)
+		goto end;
+
+	ok = (BN_cmp(ba, bb) == 0);
+
+end:
+	BN_free(ba);
+	BN_free(bb);
+	return ok;
+}
+
+/*
+ * Compare two EVP_PKEY parameters represented as UTF-8 strings.
+ * The parameter identified by |name| is retrieved from both keys and
+ * compared byte-wise. The strings must have the same length and content.
+ * Returns 1 if the parameters exist in both keys and are equal, 0 otherwise.
+ */
+static int utf8_equal_param(const EVP_PKEY *a, const EVP_PKEY *b, const char *name)
+{
+	char sa[256], sb[256];
+	size_t la = 0, lb = 0;
+	int ok = 0;
+
+	if (EVP_PKEY_get_utf8_string_param(a, name, sa, sizeof(sa), &la) != 1)
+		goto end;
+	if (EVP_PKEY_get_utf8_string_param(b, name, sb, sizeof(sb), &lb) != 1)
+		goto end;
+
+	ok = (la == lb && memcmp(sa, sb, la) == 0);
+
+end:
+	return ok;
+}
+
+/*
+ * Compare two EVP_PKEY parameters represented as octet strings.
+ * The parameter identified by |name| is retrieved from both keys as a raw
+ * byte sequence and compared byte-wise. The parameters must have the same
+ * length and identical contents.
+ * This is intended for key types where parameters are defined as opaque
+ * octet strings (e.g. Ed25519 / Ed448 public or private keys).
+ * Returns 1 if the parameters exist in both keys and are equal, 0 otherwise.
+ */
+
+static int octet_equal_param(const EVP_PKEY *a, const EVP_PKEY *b,
+                             const char *name)
+{
+	unsigned char ba[64], bb[64];
+	size_t la = 0, lb = 0;
+	int ok = 0;
+
+	if (EVP_PKEY_get_octet_string_param(a, name, ba, sizeof(ba), &la) != 1)
+		goto end;
+	if (EVP_PKEY_get_octet_string_param(b, name, bb, sizeof(bb), &lb) != 1)
+		goto end;
+
+	ok = (la == lb && memcmp(ba, bb, la) == 0);
+
+end:
+	return ok;
+}
+
+int UTIL_CTX_is_private_key(const EVP_PKEY *pkey)
+{
+	PKCS11_KEY *key = PKCS11_get_pkcs11_key(pkey);
+
+	return key->isPrivate;
+}
+
+/*
+ * Compare public key material of two keys.
+ * The comparison is algorithm-specific:
+ *  - for RSA keys, the modulus (n) and public exponent (e) are compared,
+ *  - for EC keys, the domain parameters (group) and public key point are compared.
+ *
+ * Encoding differences (e.g. compressed vs uncompressed EC points) are handled
+ * by comparing public key coordinates rather than encoded representations.
+ *
+ * Returns 1 if the public key material matches, 0 otherwise.
+ */
+int UTIL_CTX_public_match(const EVP_PKEY *pkey1, const EVP_PKEY *pkey2)
+{
+	if (pkey1 == NULL || pkey2 == NULL)
+		return 0;
+
+	/* Compare the RSA modulus (n) and the public exponent (e) */
+	if (EVP_PKEY_is_a(pkey1, "RSA") && EVP_PKEY_is_a(pkey2, "RSA"))
+		return bn_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_RSA_N)
+			&& bn_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_RSA_E);
+
+	/* Compare the EC group and public key */
+	if (EVP_PKEY_is_a(pkey1, "EC") && EVP_PKEY_is_a(pkey2, "EC")) {
+		if (!utf8_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_GROUP_NAME))
+			return 0;
+
+		/* Compare by coordinates to avoid compressed/uncompressed encodings */
+		return bn_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_EC_PUB_X)
+			&& bn_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_EC_PUB_Y);
+	}
+
+	/* Ed25519 / Ed448: compare raw public key bytes */
+	if ((EVP_PKEY_is_a(pkey1, "ED25519") && EVP_PKEY_is_a(pkey2, "ED25519")) ||
+		(EVP_PKEY_is_a(pkey1, "ED448") && EVP_PKEY_is_a(pkey2, "ED448"))) {
+		return octet_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_PUB_KEY);
+	}
+	return 0;
+}
+
+/*
+ * Compare private key material of two keys.
+ * The comparison is algorithm-specific:
+ *  - for RSA keys, the private exponent (d) is compared,
+ *  - for EC keys, the private scalar is compared.
+ *
+ * This function only compares private key material and does not attempt
+ * to validate or reconstruct the corresponding public key.
+ *
+ * Returns 1 if the private key material matches, 0 otherwise.
+ */
+int UTIL_CTX_private_match(const EVP_PKEY *pkey1, const EVP_PKEY *pkey2)
+{
+	if (!pkey1 || !pkey2)
+		return 0;
+
+	/* Compare the RSA private exponent (d) */
+	if (EVP_PKEY_is_a(pkey1, "RSA") && EVP_PKEY_is_a(pkey2, "RSA")) {
+		return bn_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_RSA_D);
+	}
+
+	/* Compare the EC private key (private scalar) */
+	if (EVP_PKEY_is_a(pkey1, "EC") && EVP_PKEY_is_a(pkey2, "EC"))
+		return bn_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_PRIV_KEY);
+
+	/* Ed25519 / Ed448: compare raw private key bytes */
+	if ((EVP_PKEY_is_a(pkey1, "ED25519") && EVP_PKEY_is_a(pkey2, "ED25519")) ||
+		(EVP_PKEY_is_a(pkey1, "ED448") && EVP_PKEY_is_a(pkey2, "ED448"))) {
+		return octet_equal_param(pkey1, pkey2, OSSL_PKEY_PARAM_PRIV_KEY);
+	}
+	return 0;
+}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /******************************************************************************/
 /* PIN handling                                                               */
