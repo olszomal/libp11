@@ -26,7 +26,7 @@ int pkcs11_global_data_refs = 0;
 /*
  * Create a new context
  */
-PKCS11_CTX *pkcs11_CTX_new(void)
+PKCS11_CTX *pkcs11_CTX_new(int flags)
 {
 	PKCS11_CTX_private *cpriv = NULL;
 	PKCS11_CTX *ctx = NULL;
@@ -38,6 +38,7 @@ PKCS11_CTX *pkcs11_CTX_new(void)
 	if (!cpriv)
 		goto fail;
 	memset(cpriv, 0, sizeof(PKCS11_CTX_private));
+	cpriv->flags = flags;
 	ctx = OPENSSL_malloc(sizeof(PKCS11_CTX));
 	if (!ctx)
 		goto fail;
