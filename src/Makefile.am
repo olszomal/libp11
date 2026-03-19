@@ -8,8 +8,6 @@ CLEANFILES = libp11.pc
 EXTRA_DIST = Makefile.mak libp11.rc.in pkcs11.rc.in
 
 # Headers
-noinst_HEADERS= libp11-int.h pkcs11.h p11_pthread.h util.h
-include_HEADERS= libp11.h p11_ver.h p11_err.h
 noinst_HEADERS= libp11-int.h pkcs11.h p11_pthread.h provider_helpers.h util.h
 include_HEADERS= libp11.h p11_err.h
 
