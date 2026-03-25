@@ -26,6 +26,18 @@
 #include "provider_helpers.h"
 #include <ctype.h> /* isdigit() */
 
+#if defined(__GNUC__) || defined(__clang__)
+#define DISABLE_OSSL3_DEPRECATED_BEGIN \
+	_Pragma("GCC diagnostic push") \
+	_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+
+#define DISABLE_OSSL3_DEPRECATED_END \
+	_Pragma("GCC diagnostic pop")
+#else
+#define DISABLE_OSSL3_DEPRECATED_BEGIN
+#define DISABLE_OSSL3_DEPRECATED_END
+#endif
+
 #define PKCS11_PROVIDER_NAME "libp11 PKCS#11 provider"
 
 typedef struct {
@@ -621,8 +633,8 @@ int p11_keydata_set_params(P11_KEYDATA *key, const OSSL_PARAM *params)
 	p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
 	if (p != NULL) {
 		if (!OSSL_PARAM_get_octet_string_ptr(p, &pub, &publen) ||
-		    pub == NULL || publen == 0 ||
-		    !p11_keydata_set_pub(key, pub, publen)) {
+			pub == NULL || publen == 0 ||
+			!p11_keydata_set_pub(key, pub, publen)) {
 			OSSL_PARAM_free(dup);
 			return 0;
 		}
@@ -631,7 +643,7 @@ int p11_keydata_set_params(P11_KEYDATA *key, const OSSL_PARAM *params)
 }
 
 /* Compare two keys by public parameters, based on the key type. */
-int keymgmt_public_match(const P11_KEYDATA *k1, const P11_KEYDATA *k2)
+int p11_public_equal(const P11_KEYDATA *k1, const P11_KEYDATA *k2)
 {
 	if (k1 == NULL || k2 == NULL || k1->params == NULL || k2->params == NULL)
 		return 0;
@@ -709,16 +721,15 @@ P11_SIGNATURE_CTX *p11_signature_ctx_new(PROVIDER_CTX *ctx, const char *propq)
 			OPENSSL_free(sig_ctx);
 			return NULL;
 		}
-	}		
+	}
+	/* prov_ctx is shared, not owned */
 	sig_ctx->prov_ctx = ctx;
 	return sig_ctx;
 }
 
 /* Release signature context and associated resources. */
-void p11_signature_ctx_free(P11_SIGNATURE_CTX *ctx)
+void p11_signature_ctx_free(P11_SIGNATURE_CTX *sig_ctx)
 {
-	P11_SIGNATURE_CTX *sig_ctx = ctx;
-
 	if (sig_ctx == NULL)
 		return;
 
@@ -728,6 +739,55 @@ void p11_signature_ctx_free(P11_SIGNATURE_CTX *ctx)
 	OPENSSL_free(sig_ctx->mgf1_mdname);
 	OPENSSL_free(sig_ctx->propq);
 	OPENSSL_free(sig_ctx);
+}
+
+/*
+ * Duplicate signature context. This must be a real duplicate, not just another
+ * reference to the same mutable object.
+ */
+P11_SIGNATURE_CTX *p11_signature_dupctx(P11_SIGNATURE_CTX *sig_ctx)
+{
+	P11_SIGNATURE_CTX *dst;
+
+	if (sig_ctx == NULL)
+		return NULL;
+
+	dst = p11_signature_ctx_new(sig_ctx->prov_ctx, sig_ctx->propq);
+	if (dst == NULL)
+		return NULL;
+
+	if (sig_ctx->mdname != NULL) {
+		dst->mdname = OPENSSL_strdup(sig_ctx->mdname);
+		if (dst->mdname == NULL)
+			goto err;
+	}
+
+	/* copy simple scalar state */
+	dst->pad_mode = sig_ctx->pad_mode;
+	dst->pss_saltlen = sig_ctx->pss_saltlen;
+
+	/* share keydata by reference */
+	if (sig_ctx->keydata != NULL) {
+		if (!p11_keydata_up_ref(sig_ctx->keydata))
+			goto err;
+		dst->keydata = sig_ctx->keydata;
+	}
+
+	/* duplicate digest state so EVP_DigestVerifyFinal() on the duplicate
+	 * does not mutate the original context */
+	if (sig_ctx->mdctx != NULL) {
+		dst->mdctx = EVP_MD_CTX_new();
+		if (dst->mdctx == NULL)
+			goto err;
+		if (EVP_MD_CTX_copy_ex(dst->mdctx, sig_ctx->mdctx) <= 0)
+			goto err;
+	}
+
+	return dst;
+
+err:
+	p11_signature_ctx_free(dst);
+	return NULL;
 }
 
 /* Initialize signature context with key and reset operation defaults. */
@@ -1072,10 +1132,8 @@ P11_ASYM_CIPHER_CTX *p11_asym_cipher_ctx_new(PROVIDER_CTX *ctx)
 }
 
 /* Release asymmetric cipher context and associated resources. */
-void p11_asym_cipher_ctx_free(P11_ASYM_CIPHER_CTX *ctx)
+void p11_asym_cipher_ctx_free(P11_ASYM_CIPHER_CTX *asym_ctx)
 {
-	P11_ASYM_CIPHER_CTX *asym_ctx = ctx;
-
 	if (asym_ctx == NULL)
 		return;
 
@@ -1084,6 +1142,59 @@ void p11_asym_cipher_ctx_free(P11_ASYM_CIPHER_CTX *ctx)
 	OPENSSL_free(asym_ctx->mgf1_mdname);
 	OPENSSL_free(asym_ctx->oaep_label);
 	OPENSSL_free(asym_ctx);
+}
+
+/*
+ * Duplicate asymmetric cipher context. This must be a real duplicate, not just
+ * another reference to the same mutable object.
+ */
+P11_ASYM_CIPHER_CTX *p11_asym_cipher_dupctx(P11_ASYM_CIPHER_CTX *asym_ctx)
+{
+	P11_ASYM_CIPHER_CTX *dst = NULL;
+
+	if (asym_ctx == NULL)
+		return NULL;
+
+	dst = p11_asym_cipher_ctx_new(asym_ctx->prov_ctx);
+	if (dst == NULL)
+		return NULL;
+
+	/* copy simple scalar state */
+	dst->pad_mode = asym_ctx->pad_mode;
+	dst->oaep_labellen = asym_ctx->oaep_labellen;
+
+	/* share keydata by reference */
+	if (asym_ctx->keydata != NULL) {
+		if (!p11_keydata_up_ref(asym_ctx->keydata))
+			goto err;
+		dst->keydata = asym_ctx->keydata;
+	}
+
+	/* deep-copy OAEP/MGF1 parameters (mutable per-context state) */
+	if (asym_ctx->oaep_mdname != NULL) {
+		dst->oaep_mdname = OPENSSL_strdup(asym_ctx->oaep_mdname);
+		if (dst->oaep_mdname == NULL)
+			goto err;
+	}
+
+	if (asym_ctx->mgf1_mdname != NULL) {
+		dst->mgf1_mdname = OPENSSL_strdup(asym_ctx->mgf1_mdname);
+		if (dst->mgf1_mdname == NULL)
+			goto err;
+	}
+
+	if (asym_ctx->oaep_label != NULL && asym_ctx->oaep_labellen > 0) {
+		dst->oaep_label = OPENSSL_memdup(asym_ctx->oaep_label,
+			asym_ctx->oaep_labellen);
+		if (dst->oaep_label == NULL)
+			goto err;
+	}
+
+	return dst;
+
+err:
+	p11_asym_cipher_ctx_free(dst);
+	return NULL;
 }
 
 /* Initialize asymmetric cipher context with key and reset OAEP defaults. */
@@ -1448,7 +1559,7 @@ static int PROVIDER_CTX_get_specific_parameters(PROVIDER_CTX *prov_ctx)
 	return rv;
 }
 
-/* Build EC public EVP_PKEY (default provider) from OSSL_PARAM[] */
+/* Build public EVP_PKEY (default provider) from OSSL_PARAM[] */
 static EVP_PKEY *pubkey_from_params_default(P11_KEYDATA *keydata)
 {
 	EVP_PKEY *pkey = NULL;
@@ -1534,20 +1645,28 @@ static const char *pkey_name_from_evp_pkey(const EVP_PKEY *pkey)
 	}
 }
 
-/* Build OSSL_PARAM list with public-key parameters extracted from an EVP_PKEY */
+/* Build OSSL_PARAM list with public-key parameters extracted from an EVP_PKEY. */
 static OSSL_PARAM *public_params_from_evp_pkey(EVP_PKEY *pkey)
 {
 	OSSL_PARAM *params = NULL;
+	OSSL_PARAM_BLD *bld = NULL;
 	BIGNUM *n = NULL, *e = NULL;
 	unsigned char *pub = NULL;
 	size_t publen = 0;
-	int nid = EVP_PKEY_base_id(pkey);
-	OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+	int nid;
 
+	if (pkey == NULL)
+		return NULL;
+
+	bld = OSSL_PARAM_BLD_new();
 	if (bld == NULL)
 		return NULL;
 
-	if (nid == EVP_PKEY_RSA || nid == EVP_PKEY_RSA_PSS) {
+	nid = EVP_PKEY_base_id(pkey);
+
+	switch (nid) {
+	case EVP_PKEY_RSA:
+	case EVP_PKEY_RSA_PSS:
 		if (!EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_N, &n) ||
 			!EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, &e))
 			goto err;
@@ -1555,40 +1674,70 @@ static OSSL_PARAM *public_params_from_evp_pkey(EVP_PKEY *pkey)
 		if (!OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_N, n) ||
 			!OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_E, e))
 			goto err;
+		break;
 
-	} else if (nid == EVP_PKEY_EC) {
+	case EVP_PKEY_EC: {
 		char group[128];
 		size_t grouplen = 0;
 
-		/* GROUP_NAME */
 		if (!EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME,
 			group, sizeof(group), &grouplen))
 			goto err;
 
-		if (!OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, group, 0 /* NUL-terminated */))
+		if (!OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME,
+			group, 0 /* NUL-terminated */))
 			goto err;
 
-		/* PUB_KEY (octets) */
-		if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, NULL, 0, &publen))
+#if OPENSSL_VERSION_NUMBER < 0x30000100L
+		/*
+		 * OpenSSL < 3.0.16 lacks a NULL check for 'point' in the
+		 * EC_POINT_point2oct() path, which may lead to invalid memory
+		 * access. Fixed upstream in 3.0.16:
+		 * https://github.com/openssl/openssl/commit/8ac42a5f418cbe2797bc423b694ac5af605b5c7a
+		 */
+		{
+			const EC_POINT *point = NULL;
+
+			DISABLE_OSSL3_DEPRECATED_BEGIN
+			{
+				const EC_KEY *eckey = EVP_PKEY_get0_EC_KEY(pkey);
+
+				if (eckey != NULL)
+					point = EC_KEY_get0_public_key(eckey);
+			}
+			DISABLE_OSSL3_DEPRECATED_END
+
+			if (point != NULL) {
+#endif
+				if (!EVP_PKEY_get_octet_string_param(pkey,
+					OSSL_PKEY_PARAM_PUB_KEY, NULL, 0, &publen))
+					goto err;
+
+				pub = OPENSSL_malloc(publen);
+				if (pub == NULL)
+					goto err;
+
+				if (!EVP_PKEY_get_octet_string_param(pkey,
+					OSSL_PKEY_PARAM_PUB_KEY, pub, publen, &publen))
+					goto err;
+#if OPENSSL_VERSION_NUMBER < 0x30000100L
+			}
+		}
+#endif
+		if (!OSSL_PARAM_BLD_push_octet_string(bld,
+			OSSL_PKEY_PARAM_PUB_KEY, pub, publen))
+			goto err;
+		break;
+	}
+
+	case EVP_PKEY_ED25519:
+	case EVP_PKEY_ED448: {
+		const char *name = (nid == EVP_PKEY_ED25519) ? "ED25519" : "ED448";
+
+		if (!OSSL_PARAM_BLD_push_utf8_string(bld,
+			OSSL_PKEY_PARAM_GROUP_NAME, name, 0))
 			goto err;
 
-		pub = OPENSSL_malloc(publen);
-		if (pub == NULL)
-			goto err;
-
-		if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, pub, publen, &publen))
-			goto err;
-
-		if (!OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pub, publen))
-			goto err;
-
-	} else if (nid == EVP_PKEY_ED25519 || nid == EVP_PKEY_ED448) {
-		const char *name  = (nid == EVP_PKEY_ED25519) ? "ED25519" : "ED448";
-
-		if (!OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, name, 0))
-			goto err;
-
-		/* OSSL_PKEY_PARAM_PUB_KEY */
 		if (!EVP_PKEY_get_raw_public_key(pkey, NULL, &publen))
 			goto err;
 
@@ -1599,29 +1748,24 @@ static OSSL_PARAM *public_params_from_evp_pkey(EVP_PKEY *pkey)
 		if (!EVP_PKEY_get_raw_public_key(pkey, pub, &publen))
 			goto err;
 
-		if (!OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pub, publen))
+		if (!OSSL_PARAM_BLD_push_octet_string(bld,
+			OSSL_PKEY_PARAM_PUB_KEY, pub, publen))
 			goto err;
-	} else {
-		/* Unsupported key type */
-		goto err;
+		break;
+	}
+
+	default:
+		goto err; /* unsupported key type */
 	}
 
 	params = OSSL_PARAM_BLD_to_param(bld);
-	if (params == NULL)
-		goto err;
-
-	OSSL_PARAM_BLD_free(bld);
-	BN_free(n);
-	BN_free(e);
-	OPENSSL_free(pub);
-	return params;
 
 err:
 	OSSL_PARAM_BLD_free(bld);
 	BN_free(n);
 	BN_free(e);
 	OPENSSL_free(pub);
-	return NULL;
+	return params;
 }
 
 /* Initialize key type and size metadata from stored key parameters. */

@@ -71,6 +71,7 @@ PROVIDER_FN(keymgmt_dup);
 
 PROVIDER_FN(signature_newctx);
 PROVIDER_FN(signature_freectx);
+PROVIDER_FN(signature_dupctx);
 PROVIDER_FN(signature_sign_init);
 PROVIDER_FN(signature_sign);
 PROVIDER_FN(signature_verify_init);
@@ -90,6 +91,7 @@ PROVIDER_FN(signature_settable_ctx_params);
 
 PROVIDER_FN(asym_cipher_newctx);
 PROVIDER_FN(asym_cipher_freectx);
+PROVIDER_FN(asym_cipher_dupctx);
 PROVIDER_FN(asym_cipher_encrypt_init);
 PROVIDER_FN(asym_cipher_encrypt);
 PROVIDER_FN(asym_cipher_decrypt_init);
@@ -138,6 +140,7 @@ static const OSSL_DISPATCH keymgmt_functions[] = {
 static const OSSL_DISPATCH signature_functions[] = {
 	{OSSL_FUNC_SIGNATURE_NEWCTX, (void (*)(void))signature_newctx},
 	{OSSL_FUNC_SIGNATURE_FREECTX, (void (*)(void))signature_freectx},
+	{OSSL_FUNC_SIGNATURE_DUPCTX, (void (*)(void))signature_dupctx},
 	{OSSL_FUNC_SIGNATURE_SIGN_INIT, (void (*)(void))signature_sign_init},
 	{OSSL_FUNC_SIGNATURE_SIGN, (void (*)(void))signature_sign},
 	{OSSL_FUNC_SIGNATURE_VERIFY_INIT, (void (*)(void))signature_verify_init},
@@ -160,6 +163,7 @@ static const OSSL_DISPATCH signature_functions[] = {
 static const OSSL_DISPATCH asym_cipher_functions[] = {
 	{OSSL_FUNC_ASYM_CIPHER_NEWCTX, (void (*)(void))asym_cipher_newctx},
 	{OSSL_FUNC_ASYM_CIPHER_FREECTX, (void (*)(void))asym_cipher_freectx},
+	{OSSL_FUNC_ASYM_CIPHER_DUPCTX, (void (*)(void))asym_cipher_dupctx},
 	{OSSL_FUNC_ASYM_CIPHER_ENCRYPT_INIT, (void (*)(void))asym_cipher_encrypt_init},
 	{OSSL_FUNC_ASYM_CIPHER_ENCRYPT, (void (*)(void))asym_cipher_encrypt},
 	{OSSL_FUNC_ASYM_CIPHER_DECRYPT_INIT, (void (*)(void))asym_cipher_decrypt_init},
@@ -448,7 +452,7 @@ static int keymgmt_match(const void *provkey1, const void *provkey2, int selecti
 
 		if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
 			/* validate whether the public keys match */
-			key_checked = keymgmt_public_match(keydata1, keydata2);
+			key_checked = p11_public_equal(keydata1, keydata2);
 		}
 		if (!key_checked && (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)) {
 			/* validate whether the private keys match, not covered by tests */
@@ -609,6 +613,17 @@ static void *signature_newctx(void *ctx, const char *propq)
 static void signature_freectx(void *ctx)
 {
 	p11_signature_ctx_free(ctx);
+}
+
+/*
+ * Duplicate signature context. Used via EVP_PKEY_CTX_dup().
+ * Required by EVP_DigestVerifyFinal() in OpenSSL 3.0.
+ * Must be a real duplicate, as finalizing the operation mutates
+ * the digest state.
+ */
+static void *signature_dupctx(void *ctx)
+{
+	return p11_signature_dupctx(ctx);
 }
 
 /*
@@ -1260,6 +1275,17 @@ static void asym_cipher_freectx(void *ctx)
 {
 	p11_asym_cipher_ctx_free(ctx);
 }
+
+/*
+ * Duplicate asymmetric cipher context. Used via EVP_PKEY_CTX_dup().
+ * Must be a real duplicate, as the context contains mutable per-operation
+ * parameters (padding, OAEP settings) that must not be shared.
+ */
+static void *asym_cipher_dupctx(void *ctx)
+{
+	return p11_asym_cipher_dupctx(ctx);
+}
+
 
 /* Initialize encryption operation with key. */
 static int asym_cipher_encrypt_init(void *ctx, void *provkey, const OSSL_PARAM params[])

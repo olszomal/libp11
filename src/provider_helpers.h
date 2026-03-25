@@ -80,7 +80,7 @@ size_t p11_keydata_get_sigsize(const P11_KEYDATA *keydata);
 int p11_keydata_get_type(const P11_KEYDATA *keydata);
 OSSL_PARAM *p11_keydata_get_params(const P11_KEYDATA *key);
 int p11_keydata_set_params(P11_KEYDATA *keydata, const OSSL_PARAM *params);
-int keymgmt_public_match(const P11_KEYDATA *k1, const P11_KEYDATA *k2);
+int p11_public_equal(const P11_KEYDATA *k1, const P11_KEYDATA *k2);
 int pad_mode_from_param(const OSSL_PARAM *p, int *pad_mode);
 
 /******************************************************************************/
@@ -88,6 +88,7 @@ int pad_mode_from_param(const OSSL_PARAM *p, int *pad_mode);
 /******************************************************************************/
 P11_SIGNATURE_CTX *p11_signature_ctx_new(PROVIDER_CTX *ctx, const char *propq);
 void p11_signature_ctx_free(P11_SIGNATURE_CTX *ctx);
+P11_SIGNATURE_CTX *p11_signature_dupctx(P11_SIGNATURE_CTX *ctx);
 int p11_signature_ctx_init(P11_SIGNATURE_CTX *sig_ctx, P11_KEYDATA *keydata,
 	const OSSL_PARAM params[]);
 int p11_signature_ctx_init_digest(P11_SIGNATURE_CTX *sig_ctx);
@@ -122,6 +123,7 @@ const char *p11_signature_pss_saltlen_to_string(int saltlen);
 /******************************************************************************/
 P11_ASYM_CIPHER_CTX *p11_asym_cipher_ctx_new(PROVIDER_CTX *ctx);
 void p11_asym_cipher_ctx_free(P11_ASYM_CIPHER_CTX *ctx);
+P11_ASYM_CIPHER_CTX *p11_asym_cipher_dupctx(P11_ASYM_CIPHER_CTX *ctx);
 int p11_asym_cipher_ctx_init(P11_ASYM_CIPHER_CTX *asym_ctx, P11_KEYDATA *keydata,
 	const OSSL_PARAM params[]);
 
