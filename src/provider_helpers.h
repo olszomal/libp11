@@ -33,6 +33,18 @@
 #include <openssl/core_object.h>
 #include <openssl/param_build.h>
 
+/* OPENSSL_strcasecmp() is available since OpenSSL 3.0.3.
+ * Provide fallback for older versions. */
+#if OPENSSL_VERSION_NUMBER < 0x30000030L
+#ifdef _WIN32
+#include <string.h>
+#define OPENSSL_strcasecmp _stricmp
+#else /* _WIN32 */
+#include <strings.h>
+#define OPENSSL_strcasecmp strcasecmp
+#endif /* _WIN32 */
+#endif /* OPENSSL_VERSION_NUMBER < 0x30000030L */
+
 /* opaque, defined in provider_helpers.c */
 typedef struct provider_ctx PROVIDER_CTX;
 typedef struct p11_pub_key_st P11_PUB_KEY;
