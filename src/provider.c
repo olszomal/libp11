@@ -40,8 +40,11 @@
 #include <openssl/params.h>
 #include <openssl/store.h>
 
+#define FIPS_PROPQ "provider=pkcs11prov,fips=yes"
+
 typedef struct {
 	PROVIDER_CTX *prov_ctx;
+	char *propq;
 	char *uri;
 	int expected_type;
 	int types_tried;
@@ -102,8 +105,8 @@ PROVIDER_FN(asym_cipher_set_ctx_params);
 PROVIDER_FN(asym_cipher_settable_ctx_params);
 
 PROVIDER_FN(store_open);
-PROVIDER_FN(store_settable_ctx_params);
 PROVIDER_FN(store_set_ctx_params);
+PROVIDER_FN(store_settable_ctx_params);
 PROVIDER_FN(store_load);
 PROVIDER_FN(store_eof);
 PROVIDER_FN(store_close);
@@ -177,8 +180,8 @@ static const OSSL_DISPATCH asym_cipher_functions[] = {
 
 static const OSSL_DISPATCH store_functions[] = {
 	{OSSL_FUNC_STORE_OPEN, (void (*)(void))store_open},
-	{OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS, (void (*)(void))store_settable_ctx_params},
 	{OSSL_FUNC_STORE_SET_CTX_PARAMS, (void (*)(void))store_set_ctx_params},
+	{OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS, (void (*)(void))store_settable_ctx_params},
 	{OSSL_FUNC_STORE_LOAD, (void (*)(void))store_load},
 	{OSSL_FUNC_STORE_EOF, (void (*)(void))store_eof},
 	{OSSL_FUNC_STORE_CLOSE, (void (*)(void))store_close},
@@ -187,25 +190,25 @@ static const OSSL_DISPATCH store_functions[] = {
 
 /* Keymgmt algorithms: must be real key types (e.g. RSA, EC), not provider names */
 static const OSSL_ALGORITHM p11_keymgmts[] = {
-	{"RSA:rsaEncryption", "provider=pkcs11", keymgmt_functions, "PKCS#11 RSA keymgm functions"},
-	{"EC:id-ecPublicKey", "provider=pkcs11", keymgmt_functions, "PKCS#11 EC keymgm functions"},
-	{"ED25519", "provider=pkcs11", keymgmt_functions, "PKCS#11 Ed25519 keymgm functions"},
-	{"ED448", "provider=pkcs11", keymgmt_functions, "PKCS#11 Ed448 keymgm functions"},
+	{"RSA:rsaEncryption", FIPS_PROPQ, keymgmt_functions, "PKCS#11 RSA keymgm functions"},
+	{"EC:id-ecPublicKey", FIPS_PROPQ, keymgmt_functions, "PKCS#11 EC keymgm functions"},
+	{"ED25519", FIPS_PROPQ, keymgmt_functions, "PKCS#11 Ed25519 keymgm functions"},
+	{"ED448", FIPS_PROPQ, keymgmt_functions, "PKCS#11 Ed448 keymgm functions"},
 	{NULL, NULL, NULL, NULL}
 };
 
 const OSSL_ALGORITHM p11_signatures[] = {
-	{"PKCS11", "provider=pkcs11", signature_functions, "PKCS#11 signature functions"},
+	{"PKCS11", FIPS_PROPQ, signature_functions, "PKCS#11 signature functions"},
 	{NULL, NULL, NULL, NULL}
 };
 
 static const OSSL_ALGORITHM p11_asym_cipher[] = {
-	{"PKCS11", "provider=pkcs11", asym_cipher_functions, "PKCS#11 asym_cipher functions"},
+	{"PKCS11", FIPS_PROPQ, asym_cipher_functions, "PKCS#11 asym_cipher functions"},
 	{NULL, NULL, NULL, NULL}
 };
 
 static const OSSL_ALGORITHM p11_storemgmt[] = {
-	{"PKCS11", "provider=pkcs11", store_functions, "PKCS#11 storage functions"},
+	{"PKCS11", FIPS_PROPQ, store_functions, "PKCS#11 storage functions"},
 	{NULL, NULL, NULL, NULL}
 };
 
@@ -370,9 +373,9 @@ static const OSSL_ITEM *provider_get_reason_strings(void *ctx)
 	static const OSSL_ITEM reason_strings[] = {
 		{1, "Memory allocation failed"},
 		{2, "Failed to set provider parameters"},
-		{3, "Failed to retrieve OSSL_STORE_PARAM_EXPECT"},
+		{3, "Failed to set store context parameters"},
 		{4, "Failed to encode X.509 certificate"},
-		{5, "No object available for OSSL_STORE_INFO"},
+		{5, "OSSL_STORE object callback failed"},
 		{0, NULL} /* Sentinel value */
 	};
 
@@ -1566,22 +1569,7 @@ static void *store_open(void *ctx, const char *uri)
 }
 
 /*
- * Returns a constant array of descriptor OSSL_PARAM(3), for parameters that
- * p11_store_set_ctx_params() can handle.
- */
-static const OSSL_PARAM *store_settable_ctx_params(void *ctx)
-{
-	static const OSSL_PARAM settable_ctx_params[] = {
-		OSSL_PARAM_int(OSSL_STORE_PARAM_EXPECT, NULL),
-		OSSL_PARAM_END
-	};
-
-	(void)(ctx);
-	return settable_ctx_params;
-}
-
-/*
- * Sets additional parameters, such as what kind of data to expect.
+ * Set store context parameters.
  */
 static int store_set_ctx_params(void *ctx, const OSSL_PARAM params[])
 {
@@ -1597,11 +1585,42 @@ static int store_set_ctx_params(void *ctx, const OSSL_PARAM params[])
 
 	param = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_EXPECT);
 	if (param != NULL && !OSSL_PARAM_get_int(param, &store_ctx->expected_type)) {
-		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 3, OPENSSL_LINE, OPENSSL_FUNC, NULL);
+		PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 3, OPENSSL_LINE,
+			OPENSSL_FUNC, NULL);
 		return 0;
 	}
 
+	param = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_PROPERTIES);
+	if (param != NULL) {
+		char *propq = NULL;
+
+		if (!OSSL_PARAM_get_utf8_string(param, &propq, 0)) {
+			PROVIDER_CTX_log(store_ctx->prov_ctx, LOG_ERR, 3,
+				OPENSSL_LINE, OPENSSL_FUNC, NULL);
+			return 0;
+		}
+
+		OPENSSL_free(store_ctx->propq);
+		store_ctx->propq = propq;
+	}
+
 	return 1;
+}
+
+/*
+ * Returns a constant array of descriptor OSSL_PARAM(3), for parameters that
+ * p11_store_set_ctx_params() can handle.
+ */
+static const OSSL_PARAM *store_settable_ctx_params(void *ctx)
+{
+	static const OSSL_PARAM settable_ctx_params[] = {
+		OSSL_PARAM_int(OSSL_STORE_PARAM_EXPECT, NULL),
+		OSSL_PARAM_utf8_string(OSSL_STORE_PARAM_PROPERTIES, NULL, 0),
+		OSSL_PARAM_END
+	};
+
+	(void)(ctx);
+	return settable_ctx_params;
 }
 
 /*
@@ -1692,8 +1711,8 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 			EVP_PKEY *key = PROVIDER_CTX_get_pubkey_from_uri(store_ctx->prov_ctx,
 				store_ctx->uri, ui_method, ui_data);
 			P11_KEYDATA *keydata = p11_keydata_from_evp_pkey(store_ctx->prov_ctx, key, 0);
-			EVP_PKEY_free(key);
 
+			EVP_PKEY_free(key);
 			if (keydata != NULL) {
 				int object_type = OSSL_OBJECT_PKEY;
 				OSSL_PARAM params[4], *p = params;
@@ -1721,8 +1740,8 @@ static int store_load(void *ctx, OSSL_CALLBACK *object_cb, void *object_cbarg,
 			EVP_PKEY *key = PROVIDER_CTX_get_privkey_from_uri(store_ctx->prov_ctx,
 				store_ctx->uri, ui_method, ui_data);
 			P11_KEYDATA *keydata = p11_keydata_from_evp_pkey(store_ctx->prov_ctx, key, 1);
-			EVP_PKEY_free(key);
 
+			EVP_PKEY_free(key);
 			PROVIDER_CTX_set_ui_method(store_ctx->prov_ctx, ui_method, NULL);
 			if (keydata != NULL) {
 				int object_type = OSSL_OBJECT_PKEY;
@@ -1776,6 +1795,7 @@ static int store_close(void *ctx)
 	if (!store_ctx)
 		return 0;
 
+	OPENSSL_free(store_ctx->propq);
 	OPENSSL_free(store_ctx->uri);
 	OPENSSL_free(store_ctx);
 	return 1;
