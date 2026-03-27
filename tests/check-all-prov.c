@@ -52,7 +52,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* Load private key, public key and certificate */
-	load_objects(argv[1], NULL, obj_set);
+	load_objects(argv[1], "provider=pkcs11prov", NULL, obj_set);
 
 	if (!obj_set->private_key) {
 		printf("Cannot load private key: %s\n", argv[1]);

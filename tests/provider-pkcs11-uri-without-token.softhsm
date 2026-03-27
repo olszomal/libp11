@@ -57,6 +57,7 @@ trap cleanup EXIT
 # Run the test
 # Generate signature without specifying the token in the PKCS#11 URI
 ${WRAPPER} ${OPENSSL} pkeyutl -provider pkcs11prov -provider default \
+	-propquery "provider=pkcs11prov" \
 	-inkey ${PRIVATE_KEY} -sign -out "${outdir}/signature.bin" \
 	-in "${outdir}/in.txt"
 if [[ $? -ne 0 ]]; then
