@@ -75,7 +75,7 @@ EVP_PKEY *PROVIDER_CTX_get_privkey_from_uri(PROVIDER_CTX *prov_ctx,
 int PROVIDER_CTX_set_ui_method(PROVIDER_CTX *prov_ctx, UI_METHOD *ui_method, void *ui_data);
 
 /******************************************************************************/
-/* KEYMGMT helper functions                                                  */
+/* KEYMGMT helper functions                                                   */
 /******************************************************************************/
 P11_KEYDATA *p11_keydata_new(PROVIDER_CTX *ctx);
 int p11_keydata_up_ref(P11_KEYDATA *keydata);
