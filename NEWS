@@ -1,5 +1,7 @@
 NEWS for Libp11 -- History of user visible changes
 
+New in 0.4.21; unreleased
+
 New in 0.4.20; 2026-08-08; Michał Trojnara
 * Added PKCS#11 3.2 interface discovery and updated the bundled header
   to version 3.2 (Małgorzata Olszówka)
