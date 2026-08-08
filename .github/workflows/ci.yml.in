@@ -76,8 +76,8 @@ jobs:
       if: matrix.id == 'ubuntu-latest' && steps.cache-openssl4.outputs.cache-hit != 'true'
       run: |
         curl -LO https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
-        tar xf openssl-4.0.0.tar.gz
-        cd openssl-4.0.0
+        tar xf "openssl-${OPENSSL_VERSION}.tar.gz"
+        cd "openssl-${OPENSSL_VERSION}"
 
         ./Configure linux-x86_64 --prefix="$HOME/openssl-4" --openssldir="$HOME/openssl-4"
         make -j"$(nproc)"
@@ -194,13 +194,20 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
+    - name: Prepare the vcpkg cache key
+      id: vcpkg-cache-key
+      shell: pwsh
+      run: |
+        $revision = git -C "${{matrix.vcpkg_root}}" rev-parse HEAD
+        "value=$env:ImageVersion-$revision" >> $env:GITHUB_OUTPUT
+
     - name: Cache the vcpkg archives
       uses: actions/cache@v5
       with:
         path: C:/Users/runneradmin/AppData/Local/vcpkg/archives
-        key: ${{matrix.id}}-${{hashFiles('vcpkg.json')}}
+        key: ${{matrix.id}}-vcpkg-${{steps.vcpkg-cache-key.outputs.value}}-${{hashFiles('.github/workflows/ci.yml.in')}}
         restore-keys: |
-          ${{matrix.id}}-${{hashFiles('vcpkg.json')}}
+          ${{matrix.id}}-vcpkg-
           ${{matrix.id}}-
 
     - name: Configure Visual Studio
