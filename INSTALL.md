@@ -1,5 +1,6 @@
 # libp11 Installation
-The following instructions only apply to the [release tarballs.](https://github.com/OpenSC/libp11/releases)
+The following instructions apply to the [release tarballs](https://github.com/OpenSC/libp11/releases)
+and builds from the Git repository.
 
 ## Unix Build
 
@@ -7,6 +8,12 @@ Install pkgconf and the OpenSSL development package.
 On Debian/Ubuntu use:
 
   sudo apt install pkgconf libssl-dev
+
+When building from the Git repository, install the Autotools packages and run `./bootstrap` first:
+
+  sudo apt install autoconf automake libtool
+
+  ./bootstrap
 
 Configure and build libp11:
 
