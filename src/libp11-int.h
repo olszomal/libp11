@@ -626,11 +626,6 @@ extern void pkcs11_ed_key_method_free(void);
 extern void pkcs11_xdh_key_method_free(void);
 #endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
-/* Free the global RSA EVP_PKEY_METHOD */
-extern void pkcs11_rsa_key_method_free(void);
-# endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
-
 #if OPENSSL_VERSION_NUMBER < 0x100020d0L || defined(LIBRESSL_VERSION_NUMBER)
 /* Get sign_init and sign callbacks from EVP_PKEY_METHOD */
 extern void EVP_PKEY_meth_get_sign(EVP_PKEY_METHOD *pmeth,

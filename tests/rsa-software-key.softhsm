@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# Copyright (C) 2026 OpenSC Project
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+outdir="output.$$"
+
+PRIVATE_KEY="pkcs11:token=libp11-0;id=%01%02%03%04;object=server-key-0;type=private;pin-value=1234"
+PUBLIC_KEY="pkcs11:token=libp11-0;id=%01%02%03%04;object=server-key-0;type=public;pin-value=1234"
+
+# Load common test functions
+. ${srcdir}/common.sh
+
+# Do the token initialization
+init_token "rsa" "1" "libp11" ${ID} "server-key" "privkey" "pubkey"
+
+# Exercise software PSS encoding over raw RSA when native PSS is unavailable.
+# This filtering feature is specific to SoftHSM2.
+if [[ -n "${SOFTHSM2_CONF}" ]]; then
+	echo "slots.mechanisms = CKM_RSA_PKCS_KEY_PAIR_GEN,CKM_RSA_X_509" \
+		>>"${SOFTHSM2_CONF}"
+	LD_LIBRARY_PATH="${TEMP_LD_LIBRARY_PATH}" has_mechanism RSA-PKCS-PSS
+	has_pss=$?
+	LD_LIBRARY_PATH="${TEMP_LD_LIBRARY_PATH}" has_mechanism RSA-X-509
+	has_raw=$?
+	if [[ $has_pss -eq 0 || $has_raw -ne 0 ]]; then
+		echo "Failed to configure raw RSA without native RSA-PSS."
+		exit 1
+	fi
+fi
+
+# Load openssl settings
+. ${srcdir}/openssl-settings.sh
+
+# Restore openssl settings
+trap cleanup EXIT
+
+${WRAPPER} ./rsa-software-key ${MODULE} ${PIN}
+rc=$?
+if [[ $rc -eq 77 ]]; then
+	echo "Software RSA key isolation test skipped."
+	rm -rf "$outdir"
+	exit 77
+elif [[ $rc -ne 0 ]]; then
+	echo "Software RSA key isolation test failed."
+	exit 1
+fi
+
+# RSA-PSS method selection is part of the ENGINE integration.  Verify both
+# software encoding over raw RSA and native token PSS through that interface.
+${WRAPPER} ./rsa-pss-sign ${PIN} "${outdir}/engines.cnf" \
+	${PRIVATE_KEY} ${PUBLIC_KEY} ${MODULE}
+rc=$?
+if [[ $rc -ne 0 && $rc -ne 77 ]]; then
+	echo "Raw RSA-PSS ENGINE test failed."
+	exit 1
+fi
+
+if [[ -n "${SOFTHSM2_CONF}" && $rc -ne 77 ]]; then
+	grep -v '^slots.mechanisms' "${SOFTHSM2_CONF}" >"${SOFTHSM2_CONF}.tmp"
+	echo "slots.mechanisms = CKM_RSA_PKCS_KEY_PAIR_GEN,CKM_RSA_PKCS_PSS" \
+		>>"${SOFTHSM2_CONF}.tmp"
+	mv "${SOFTHSM2_CONF}.tmp" "${SOFTHSM2_CONF}"
+	LD_LIBRARY_PATH="${TEMP_LD_LIBRARY_PATH}" has_mechanism RSA-PKCS-PSS
+	has_pss=$?
+	LD_LIBRARY_PATH="${TEMP_LD_LIBRARY_PATH}" has_mechanism RSA-X-509
+	has_raw=$?
+	if [[ $has_pss -ne 0 || $has_raw -eq 0 ]]; then
+		echo "Failed to configure native RSA-PSS without raw RSA."
+		exit 1
+	fi
+	${WRAPPER} ./rsa-pss-sign ${PIN} "${outdir}/engines.cnf" \
+		${PRIVATE_KEY} ${PUBLIC_KEY} ${MODULE}
+	if [[ $? -ne 0 ]]; then
+		echo "Native RSA-PSS ENGINE test failed."
+		exit 1
+	fi
+fi
+
+rm -rf "$outdir"
+exit 0
