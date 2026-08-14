@@ -22,6 +22,7 @@ check_PROGRAMS = \
 	rsa-oaep \
 	rsa-oaep-prov \
 	rsa-software-key \
+	rsa-pss-direct \
 	check-privkey \
 	check-privkey-prov \
 	dup-key \

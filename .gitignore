@@ -83,6 +83,7 @@ tests/fork-change-slot
 tests/rsa-oaep
 tests/rsa-pss-sign
 tests/rsa-software-key
+tests/rsa-pss-direct
 tests/check-privkey
 tests/dup-key
 tests/check-privkey-prov
