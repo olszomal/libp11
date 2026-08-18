@@ -39,6 +39,23 @@ char *pkcs11_strdup(char *mem, size_t size)
 	return res;
 }
 
+void *pkcs11_zalloc(size_t size)
+{
+	void *mem = OPENSSL_malloc(size);
+
+	if (mem)
+		memset(mem, 0, size);
+	return mem;
+}
+
+void pkcs11_clear_free(void *mem, size_t size)
+{
+	if (mem) {
+		OPENSSL_cleanse(mem, size);
+		OPENSSL_free(mem);
+	}
+}
+
 int pkcs11_atomic_add(int *value, int amount, pthread_mutex_t *lock)
 {
 #if defined( _WIN32)

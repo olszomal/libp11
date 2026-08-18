@@ -71,10 +71,9 @@ C_LoadModule(const char *mspec, CK_FUNCTION_LIST_PTR_PTR funcs,
 	if (funcs_3_2)
 		*funcs_3_2 = NULL;
 
-	mod = OPENSSL_zalloc(sizeof(sc_pkcs11_module_t));
+	mod = pkcs11_zalloc(sizeof(sc_pkcs11_module_t));
 	if (!mod)
 		return NULL;
-
 	mod->_magic = MAGIC;
 
 	/* The caller intentionally selects the PKCS#11 module to load. */

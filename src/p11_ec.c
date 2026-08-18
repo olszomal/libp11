@@ -584,7 +584,7 @@ static int pkcs11_ecdh_derive(unsigned char **out, size_t *outlen,
 	if (pkcs11_evp_pkey_ecdh_derive(key,
 			params->pPublicData, params->ulPublicDataLen,
 			cofactor_mode, secret, &secretlen) <= 0) {
-		OPENSSL_clear_free(secret, (size_t)key_len);
+		pkcs11_clear_free(secret, (size_t)key_len);
 		return -1;
 	}
 

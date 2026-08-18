@@ -658,7 +658,7 @@ end:
 	if (newkey != CK_INVALID_HANDLE)
 		CRYPTOKI_call(ctx, C_DestroyObject(session, newkey));
 
-	OPENSSL_clear_free(value, value_len_alloc);
+	pkcs11_clear_free(value, value_len_alloc);
 	pkcs11_session_pool_release(slot, session);
 	return rv;
 }
@@ -784,7 +784,7 @@ end:
 	if (newkey != CK_INVALID_HANDLE)
 		CRYPTOKI_call(ctx, C_DestroyObject(session, newkey));
 
-	OPENSSL_clear_free(value, value_len_alloc);
+	pkcs11_clear_free(value, value_len_alloc);
 	pkcs11_session_pool_release(slot, session);
 	return rv;
 }
@@ -863,7 +863,12 @@ static int pkcs11_build_digestinfo(const char *mdname,
 	if (x509_sig == NULL)
 		return 0;
 
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+	alg = x509_sig->algor;
+	digest = x509_sig->digest;
+#else
 	X509_SIG_getm(x509_sig, &alg, &digest);
+#endif
 
 	if (!X509_ALGOR_set0(alg, OBJ_nid2obj(EVP_MD_type(md)), V_ASN1_NULL, NULL))
 		goto err;
@@ -1341,7 +1346,7 @@ extern int pkcs11_evp_pkey_ecdh_derive(PKCS11_OBJECT_private *key,
 
 	rv = pkcs11_derive_with_mechanism(key, &mechanism, secret, secretlen);
 
-	OPENSSL_clear_free(der_pub, der_pub_len);
+	pkcs11_clear_free(der_pub, der_pub_len);
 
 	if (rv != CKR_OK)
 		return -1;

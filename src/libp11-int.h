@@ -200,6 +200,8 @@ extern int ERR_load_CKR_strings(void);
 #define PKCS11_DUP(s) \
 	pkcs11_strdup((char *) s, sizeof(s))
 extern char *pkcs11_strdup(char *, size_t);
+extern void *pkcs11_zalloc(size_t);
+extern void pkcs11_clear_free(void *, size_t);
 
 /* Emulate the OpenSSL 1.1 getters */
 #if OPENSSL_VERSION_NUMBER < 0x10100003L || ( defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3000000L )
