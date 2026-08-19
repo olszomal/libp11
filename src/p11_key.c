@@ -1379,6 +1379,26 @@ PKCS11_OBJECT_private *pkcs11_get_ex_data_object(const EVP_PKEY *pk)
 {
 	return pkcs11_get_ex_data_evp_pkey(pk);
 }
+
+/*
+ * Return the borrowed private PKCS#11 object for legacy EVP_PKEY_METHOD
+ * operations, or NULL if unavailable or disabled.
+ */
+PKCS11_OBJECT_private *pkcs11_get_legacy_pkey_object(const EVP_PKEY *pkey)
+{
+	PKCS11_OBJECT_private *key;
+
+	key = pkcs11_get_ex_data_object(pkey);
+	if (key == NULL)
+		return NULL;
+
+	if (key->object_class != CKO_PRIVATE_KEY ||
+			key->slot == NULL || key->slot->ctx == NULL ||
+			(key->slot->ctx->flags & PKCS11_FLAG_NO_METHODS) != 0)
+		return NULL;
+
+	return key;
+}
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /*
@@ -1773,12 +1793,10 @@ static PKCS11_OBJECT_ops *pkcs11_slhdsa_ops_from_param(CK_ULONG param_set)
 static EVP_PKEY *pkcs11_dup_raw_public_key(EVP_PKEY *pkey)
 {
 	const char *name;
+	const char *properties = NULL;
 	unsigned char *pub = NULL;
 	size_t publen = 0;
 	EVP_PKEY *ret = NULL;
-#if OPENSSL_VERSION_NUMBER < 0x40000000L
-	PKCS11_OBJECT_private *obj;
-#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
 
 	if (pkey == NULL)
 		return NULL;
@@ -1786,6 +1804,9 @@ static EVP_PKEY *pkcs11_dup_raw_public_key(EVP_PKEY *pkey)
 	name = EVP_PKEY_get0_type_name(pkey);
 	if (name == NULL)
 		return NULL;
+
+	if (!strcmp(name, "FALCON-512") || !strcmp(name, "FALCON-1024"))
+		properties = "provider=pkcs11prov";
 
 	if (!EVP_PKEY_get_raw_public_key(pkey, NULL, &publen) ||
 			publen == 0)
@@ -1798,16 +1819,8 @@ static EVP_PKEY *pkcs11_dup_raw_public_key(EVP_PKEY *pkey)
 	if (!EVP_PKEY_get_raw_public_key(pkey, pub, &publen))
 		goto end;
 
-	ret = EVP_PKEY_new_raw_public_key_ex(NULL, name, NULL, pub, publen);
-	if (ret == NULL)
-		goto end;
+	ret = EVP_PKEY_new_raw_public_key_ex(NULL, name, properties, pub, publen);
 
-#if OPENSSL_VERSION_NUMBER < 0x40000000L
-	/* Preserve the ex_data association used by legacy EVP_PKEY_METHOD wrappers. */
-	obj = pkcs11_get_ex_data_pkey(pkey);
-	if (obj != NULL)
-		pkcs11_set_ex_data_pkey(ret, obj);
-#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
 end:
 	OPENSSL_free(pub);
 	return ret;
@@ -1962,11 +1975,6 @@ void pkcs11_set_ex_data_pkey(EVP_PKEY *pkey, PKCS11_OBJECT_private *key)
 	EVP_PKEY_set_ex_data(pkey, pkey_ex_index, key);
 }
 
-PKCS11_OBJECT_private *pkcs11_get_ex_data_pkey(const EVP_PKEY *pkey)
-{
-	return EVP_PKEY_get_ex_data(pkey, pkey_ex_index);
-}
-
 void alloc_pkey_ex_index(void)
 {
 	if (pkey_ex_index == 0) {
@@ -2019,6 +2027,9 @@ static int pkcs11_try_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		return -1;
 
 	key = pkcs11_get_ex_data_rsa(rsa);
+	if (!key)
+		return -1;
+
 	if (check_object_fork(key) < 0)
 		return -1;
 
@@ -2090,6 +2101,9 @@ static int pkcs11_try_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
 		return -1;
 
 	key = pkcs11_get_ex_data_rsa(rsa);
+	if (!key)
+		return -1;
+
 	if (check_object_fork(key) < 0)
 		return -1;
 
