@@ -370,6 +370,9 @@ extern PKCS11_KEY *pkcs11_find_key(PKCS11_OBJECT_private *cert);
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /* Return the borrowed PKCS#11 object associated with the EVP_PKEY */
 extern PKCS11_OBJECT_private *pkcs11_get_ex_data_object(const EVP_PKEY *pk);
+
+/* Return the borrowed private PKCS#11 object for EVP_PKEY_METHOD operations */
+extern PKCS11_OBJECT_private *pkcs11_get_legacy_pkey_object(const EVP_PKEY *pkey);
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /* Get a list of all certificates matching with template associated with this token */
@@ -591,9 +594,6 @@ extern void pkcs11_set_ex_data_ec(EC_KEY *ec, PKCS11_OBJECT_private *key);
 /* Set PKCS11_OBJECT_private for an EVP_PKEY */
 extern void pkcs11_set_ex_data_pkey(EVP_PKEY *pkey, PKCS11_OBJECT_private *key);
 
-/* Retrieve PKCS11_OBJECT_private from an EVP_PKEY */
-extern PKCS11_OBJECT_private *pkcs11_get_ex_data_pkey(const EVP_PKEY *pkey);
-
 /* Allocate a global EVP_PKEY ex_data index */
 extern void alloc_pkey_ex_index(void);
 
@@ -623,14 +623,6 @@ extern void pkcs11_ecdsa_method_free(void);
 
 /* Free the global ECDH_METHOD */
 extern void pkcs11_ecdh_method_free(void);
-
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
-/* Free the global ED25519/ED448 EVP_PKEY_METHOD */
-extern void pkcs11_ed_key_method_free(void);
-
-/* Free the global X25519/X448 EVP_PKEY_METHOD */
-extern void pkcs11_xdh_key_method_free(void);
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
 
 #if OPENSSL_VERSION_NUMBER < 0x100020d0L || defined(LIBRESSL_VERSION_NUMBER)
 /* Get sign_init and sign callbacks from EVP_PKEY_METHOD */
