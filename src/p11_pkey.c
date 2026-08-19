@@ -34,6 +34,13 @@
 #define RSA_PSS_SALTLEN_AUTO_DIGEST_MAX -4
 #endif
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && \
+	OPENSSL_VERSION_NUMBER < 0x40000000L && \
+	!defined(OPENSSL_NO_DEPRECATED_3_0) && \
+	!defined(OPENSSL_NO_ECX)
+#define LIBP11_HAVE_ECX_METHODS
+#endif
+
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
 # ifndef OPENSSL_NO_EC
 static int (*orig_pkey_ec_sign_init) (EVP_PKEY_CTX *ctx);
@@ -41,16 +48,54 @@ static int (*orig_pkey_ec_sign) (EVP_PKEY_CTX *ctx,
 	unsigned char *sig, size_t *siglen,
 	const unsigned char *tbs, size_t tbslen);
 # endif /* OPENSSL_NO_EC */
-
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
-static int (*orig_pkey_ed25519_digestsign)(EVP_MD_CTX *ctx,
-	unsigned char *sig, size_t *siglen,
-	const unsigned char *tbs, size_t tbslen);
-static int (*orig_pkey_ed448_digestsign)(EVP_MD_CTX *ctx,
-	unsigned char *sig, size_t *siglen,
-	const unsigned char *tbs, size_t tbslen);
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
 #endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
+
+#ifdef LIBP11_HAVE_ECX_METHODS
+#define ED25519_SIG_LEN 64
+#define ED448_SIG_LEN   114
+#define X25519_KEY_LEN  32
+#define X448_KEY_LEN    56
+
+typedef int (*P11_ECX_INIT_FN)(EVP_PKEY_CTX *);
+typedef int (*P11_ECX_SIGN_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *,
+	const unsigned char *, size_t);
+typedef int (*P11_ECX_DIGESTSIGN_FN)(EVP_MD_CTX *, unsigned char *, size_t *,
+	const unsigned char *, size_t);
+typedef int (*P11_ECX_DERIVE_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *);
+
+typedef enum {
+	P11_ECX_EDDSA,
+	P11_ECX_XDH
+} P11_ECX_KIND;
+
+typedef struct {
+	int type;
+	P11_ECX_KIND kind;
+	EVP_PKEY_METHOD *method;
+	P11_ECX_INIT_FN original_init;
+	P11_ECX_SIGN_FN original_sign;
+	P11_ECX_DIGESTSIGN_FN original_digestsign;
+	P11_ECX_DERIVE_FN original_derive;
+} P11_ECX_METHOD;
+
+static P11_ECX_METHOD ecx_methods[] = {
+	{ .type = EVP_PKEY_ED25519, .kind = P11_ECX_EDDSA },
+	{ .type = EVP_PKEY_ED448, .kind = P11_ECX_EDDSA },
+	{ .type = EVP_PKEY_X25519, .kind = P11_ECX_XDH },
+	{ .type = EVP_PKEY_X448, .kind = P11_ECX_XDH }
+};
+
+static P11_ECX_METHOD *ecx_method_by_type(int type)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(ecx_methods) / sizeof(ecx_methods[0]); i++) {
+		if (ecx_methods[i].type == type)
+			return &ecx_methods[i];
+	}
+	return NULL;
+}
+#endif /* LIBP11_HAVE_ECX_METHODS */
 
 #if OPENSSL_VERSION_NUMBER < 0x10002000L || defined(LIBRESSL_VERSION_NUMBER)
 
@@ -565,7 +610,6 @@ end:
 	return rv;
 }
 
-#ifndef OPENSSL_NO_EC
 /*
  * Execute a PKCS#11 derive operation using the specified mechanism.
  * Returns: CKR_OK on success or PKCS#11/vendor defined error code on failure.
@@ -663,6 +707,7 @@ end:
 	return rv;
 }
 
+#ifndef OPENSSL_NO_EC
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /*
  * Execute a PKCS#11 decapsulation operation using the specified mechanism.
@@ -1483,6 +1528,9 @@ static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		return -1; /* buffer too small */
 
 	key = pkcs11_get_ex_data_ec(eckey);
+	if (!key)
+		return -1;
+
 	if (check_object_fork(key) < 0)
 		return -1;
 
@@ -1499,147 +1547,352 @@ static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 }
 #endif /* OPENSSL_NO_EC */
 
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
-/* PKCS#11 sign implementation for Ed25519 / Ed448 */
-static int pkcs11_eddsa_sign(unsigned char *sig, size_t *siglen,
-	const unsigned char *tbs, size_t tbslen, PKCS11_OBJECT_private *key)
-{
-	PKCS11_SLOT_private *slot;
-	CK_SESSION_HANDLE session;
-
-	slot = key->slot;
-	if (!slot)
-		return -1;
-
-	if (pkcs11_session_pool_acquire(slot, 0, &session))
-		return -1;
-
-	pkcs11_session_pool_release(slot, session);
-
-	return pkcs11_evp_pkey_eddsa_sign(key, sig, siglen, tbs, tbslen);
-}
+#ifdef LIBP11_HAVE_ECX_METHODS
 
 /*
- * EVP_PKEY method sign wrapper for EdDSA.
- * This function is invoked internally by EVP_PKEY_sign().
- * If the key belongs to PKCS#11, perform signing via pkcs11_eddsa_sign().
- */
-static int pkcs11_eddsa_pmeth_sign(EVP_PKEY_CTX *evp_pkey_ctx,
-	unsigned char *sig, size_t *siglen,
-	const unsigned char *tbs, size_t tbslen)
-{
-	EVP_PKEY *pkey;
-	PKCS11_OBJECT_private *key;
-	int rv;
-
-	if (!evp_pkey_ctx)
-		return -1;
-
-	if (*siglen > UINT_MAX)
-		return 0;
-
-	pkey = EVP_PKEY_CTX_get0_pkey(evp_pkey_ctx);
-	if (!pkey)
-		return -1;
-
-	key = pkcs11_get_ex_data_pkey(pkey);
-	if (!key)
-		return -1;
-
-	if (check_object_fork(key) < 0)
-		return -1;
-
-	rv = pkcs11_eddsa_sign(sig, siglen, tbs, tbslen, key);
-	if (rv < 0)
-		return -1;
-
-	return 1;
-}
-
-/*
- * Custom EVP_PKEY_METHOD digestsign implementation for EdDSA (Ed25519/Ed448)
+ * Try Ed25519/Ed448 signing through PKCS#11.
  *
- * This function supports the two-step signing process used by EVP_DigestSign*():
- *   1. Query the required signature length (sig == NULL).
- *   2. Perform the actual signing when a buffer is provided (sig != NULL).
- *
- * If the key is managed by PKCS#11, the signing is performed via pkcs11_eddsa_sign().
- * Otherwise, the call is delegated to the original OpenSSL Ed25519/Ed448 implementation.
+ * Return -1 only when the key should be handled by the original OpenSSL
+ * method.  Once a PKCS#11 private key has been recognized, operational
+ * failures return 0 and must not silently fall back to software.
  */
-static int pkcs11_eddsa_pmeth_digestsign(EVP_MD_CTX *ctx, unsigned char *sig,
+static int pkcs11_eddsa_pmeth_sign(EVP_PKEY_CTX *ctx, unsigned char *sig,
 	size_t *siglen, const unsigned char *tbs, size_t tbslen)
 {
 	EVP_PKEY *pkey;
 	PKCS11_OBJECT_private *key;
-	int rv;
+	size_t required;
 
-	pkey = EVP_PKEY_CTX_get0_pkey(EVP_MD_CTX_pkey_ctx(ctx));
-	if (!pkey)
+	if (ctx == NULL)
+		return 0;
+
+	pkey = EVP_PKEY_CTX_get0_pkey(ctx);
+	if (pkey == NULL)
+		return 0;
+
+	key = pkcs11_get_legacy_pkey_object(pkey);
+	if (key == NULL)
 		return -1;
 
-	key = pkcs11_get_ex_data_pkey(pkey);
-	if (!key)
+	if (key->object_class != CKO_PRIVATE_KEY)
 		return -1;
 
-	/* Step 1: caller asks for signature length only */
-	if (sig == NULL) {
-		if (EVP_PKEY_id(pkey) == EVP_PKEY_ED25519)
-			*siglen = 64; /* fixed size for Ed25519 */
-		else if (EVP_PKEY_id(pkey) == EVP_PKEY_ED448)
-			*siglen = 114; /* fixed size for Ed448 */
-		else
-			return -1;
-		/* success: report the expected signature length only,
-		 * no signing is performed in this call */
-		return 1;
-	}
+	if (key->slot == NULL || key->slot->ctx == NULL)
+		return 0;
 
-	/* Step 2: actual signing */
-	rv = pkcs11_eddsa_sign(sig, siglen, tbs, tbslen, key);
-	if (rv < 0)
-		return 1;
+	if ((key->slot->ctx->flags & PKCS11_FLAG_NO_METHODS) != 0)
+		return -1;
 
-	return 1;
-}
+	if (check_object_fork(key) < 0)
+		return 0;
 
-static int pkcs11_pkey_ed25519_digestsign(EVP_MD_CTX *ctx,
-		unsigned char *sig, size_t *siglen,
-		const unsigned char *tbs, size_t tbslen)
-{
-	int ret;
+	if (siglen == NULL || tbs == NULL)
+		return 0;
 
-	ret = pkcs11_eddsa_pmeth_digestsign(ctx, sig, siglen, tbs, tbslen);
-	if (ret < 0)
-		ret = (*orig_pkey_ed25519_digestsign)(ctx, sig, siglen, tbs, tbslen);
-	return ret;
-}
-
-static int pkcs11_pkey_ed448_digestsign(EVP_MD_CTX *ctx,
-		unsigned char *sig, size_t *siglen,
-		const unsigned char *tbs, size_t tbslen)
-{
-	int ret;
-
-	ret = pkcs11_eddsa_pmeth_digestsign(ctx, sig, siglen, tbs, tbslen);
-	if (ret < 0)
-		ret = (*orig_pkey_ed448_digestsign)(ctx, sig, siglen, tbs, tbslen);
-	return ret;
-}
-
-static int pkcs11_eddsa_pmeth_ctrl(EVP_PKEY_CTX *ctx, int type, int p1, void *p2)
-{
-	(void)ctx;
-	(void)p1;
-	switch (type) {
-	case EVP_PKEY_CTRL_MD:
-		if (p2 == NULL)
-			return 1; /* Accept NULL digest */
-		return 0; /* Reject if caller tries to set a digest */
+	switch (EVP_PKEY_get_id(pkey)) {
+	case EVP_PKEY_ED25519:
+		required = ED25519_SIG_LEN;
+		break;
+	case EVP_PKEY_ED448:
+		required = ED448_SIG_LEN;
+		break;
 	default:
-		return -2; /* command not supported */
+		return 0;
 	}
+
+	if (sig == NULL) {
+		*siglen = required;
+		return 1;
+	}
+
+	if (*siglen < required) {
+		*siglen = required;
+		return 0;
+	}
+
+	return pkcs11_evp_pkey_eddsa_sign(key, sig, siglen,
+		tbs, tbslen) > 0 ? 1 : 0;
 }
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
+
+static int pkcs11_eddsa_pmeth_digestsign(EVP_MD_CTX *mdctx,
+	unsigned char *sig, size_t *siglen,
+	const unsigned char *tbs, size_t tbslen)
+{
+	EVP_PKEY_CTX *ctx;
+
+	if (mdctx == NULL)
+		return 0;
+
+	ctx = EVP_MD_CTX_pkey_ctx(mdctx);
+	if (ctx == NULL)
+		return 0;
+
+	return pkcs11_eddsa_pmeth_sign(ctx, sig, siglen, tbs, tbslen);
+}
+
+/*
+ * Try X25519/X448 derive through PKCS#11.
+ *
+ * The peer is validated before the length query so an incomplete derive
+ * context is not reported as usable.  The raw peer public key passed to
+ * CKM_ECDH1_DERIVE is the RFC 7748 representation.
+ */
+static int pkcs11_xdh_pmeth_derive(EVP_PKEY_CTX *ctx,
+	unsigned char *secret, size_t *secretlen)
+{
+	EVP_PKEY *pkey;
+	EVP_PKEY *peerkey;
+	PKCS11_OBJECT_private *key;
+	unsigned char peer_public[X448_KEY_LEN];
+	size_t peer_public_len;
+	size_t required;
+	int type;
+
+	if (ctx == NULL)
+		return 0;
+
+	pkey = EVP_PKEY_CTX_get0_pkey(ctx);
+	if (pkey == NULL)
+		return 0;
+
+	key = pkcs11_get_legacy_pkey_object(pkey);
+	if (key == NULL)
+		return -1;
+
+	if (key->object_class != CKO_PRIVATE_KEY)
+		return -1;
+
+	if (key->slot == NULL || key->slot->ctx == NULL)
+		return 0;
+
+	if ((key->slot->ctx->flags & PKCS11_FLAG_NO_METHODS) != 0)
+		return -1;
+
+	if (check_object_fork(key) < 0)
+		return 0;
+
+	if (secretlen == NULL)
+		return 0;
+
+	type = EVP_PKEY_get_id(pkey);
+	switch (type) {
+	case EVP_PKEY_X25519:
+		required = X25519_KEY_LEN;
+		break;
+	case EVP_PKEY_X448:
+		required = X448_KEY_LEN;
+		break;
+	default:
+		return 0;
+	}
+
+	peerkey = EVP_PKEY_CTX_get0_peerkey(ctx);
+	if (peerkey == NULL || EVP_PKEY_get_id(peerkey) != type)
+		return 0;
+
+	if (secret == NULL) {
+		*secretlen = required;
+		return 1;
+	}
+
+	if (*secretlen < required) {
+		*secretlen = required;
+		return 0;
+	}
+
+	peer_public_len = 0;
+	if (EVP_PKEY_get_raw_public_key(peerkey, NULL,
+			&peer_public_len) != 1 || peer_public_len != required)
+		return 0;
+
+	if (EVP_PKEY_get_raw_public_key(peerkey,
+			peer_public, &peer_public_len) != 1 ||
+			peer_public_len != required)
+		return 0;
+
+	if (pkcs11_evp_pkey_xdh_derive(key, peer_public,
+			peer_public_len, secret, secretlen) <= 0)
+		return 0;
+
+	/* RFC 7748 derives have a fixed-width output. */
+	return *secretlen == required ? 1 : 0;
+}
+
+static int pkcs11_ecx_sign(EVP_PKEY_CTX *ctx, unsigned char *sig,
+	size_t *siglen, const unsigned char *tbs, size_t tbslen)
+{
+	EVP_PKEY *pkey = NULL;
+	P11_ECX_METHOD *state = NULL;
+	int ret;
+
+	if (ctx != NULL)
+		pkey = EVP_PKEY_CTX_get0_pkey(ctx);
+	if (pkey != NULL)
+		state = ecx_method_by_type(EVP_PKEY_get_id(pkey));
+
+	if (state == NULL || state->kind != P11_ECX_EDDSA)
+		return 0;
+
+	ret = pkcs11_eddsa_pmeth_sign(ctx, sig, siglen, tbs, tbslen);
+	if (ret < 0 && state->original_sign != NULL)
+		ret = state->original_sign(ctx, sig, siglen, tbs, tbslen);
+
+	return ret;
+}
+
+static int pkcs11_ecx_digestsign(EVP_MD_CTX *mdctx,
+	unsigned char *sig, size_t *siglen,
+	const unsigned char *tbs, size_t tbslen)
+{
+	EVP_PKEY_CTX *ctx = NULL;
+	EVP_PKEY *pkey = NULL;
+	P11_ECX_METHOD *state = NULL;
+	int ret;
+
+	if (mdctx != NULL)
+		ctx = EVP_MD_CTX_pkey_ctx(mdctx);
+	if (ctx != NULL)
+		pkey = EVP_PKEY_CTX_get0_pkey(ctx);
+	if (pkey != NULL)
+		state = ecx_method_by_type(EVP_PKEY_get_id(pkey));
+
+	if (state == NULL || state->kind != P11_ECX_EDDSA)
+		return 0;
+
+	ret = pkcs11_eddsa_pmeth_digestsign(mdctx, sig, siglen, tbs, tbslen);
+	if (ret < 0 && state->original_digestsign != NULL)
+		ret = state->original_digestsign(mdctx, sig, siglen, tbs, tbslen);
+
+	return ret;
+}
+
+static int pkcs11_ecx_derive(EVP_PKEY_CTX *ctx,
+	unsigned char *secret, size_t *secretlen)
+{
+	EVP_PKEY *pkey = NULL;
+	P11_ECX_METHOD *state = NULL;
+	int ret;
+
+	if (ctx != NULL)
+		pkey = EVP_PKEY_CTX_get0_pkey(ctx);
+	if (pkey != NULL)
+		state = ecx_method_by_type(EVP_PKEY_get_id(pkey));
+
+	if (state == NULL || state->kind != P11_ECX_XDH)
+		return 0;
+
+	ret = pkcs11_xdh_pmeth_derive(ctx, secret, secretlen);
+	if (ret < 0 && state->original_derive != NULL)
+		ret = state->original_derive(ctx, secret, secretlen);
+
+	return ret;
+}
+
+static void ecx_method_reset(P11_ECX_METHOD *state)
+{
+	state->method = NULL;
+	state->original_init = NULL;
+	state->original_sign = NULL;
+	state->original_digestsign = NULL;
+	state->original_derive = NULL;
+}
+
+/*
+ * Build an ENGINE-scoped ECX EVP_PKEY_METHOD.
+ *
+ * This follows p11_ecx.c's copy-and-override model, but deliberately does
+ * not call EVP_PKEY_meth_add0(): the wrapper is returned only by the ENGINE.
+ */
+static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
+{
+	P11_ECX_METHOD *state;
+	const EVP_PKEY_METHOD *original;
+	int original_type;
+	int original_flags;
+
+	state = ecx_method_by_type(type);
+	if (state == NULL)
+		return NULL;
+
+	/* Already initialized */
+	if (state->method != NULL)
+		return state->method;
+
+	/*
+	 * ECX methods are wrappers around the original OpenSSL method.
+	 * Preserve all callbacks that are not explicitly overridden below.
+	 */
+	original = EVP_PKEY_meth_find(state->type);
+	if (original == NULL)
+		return NULL;
+
+	EVP_PKEY_meth_get0_info(&original_type, &original_flags, original);
+	if (original_type != state->type)
+		return NULL;
+
+	/*
+	 * OpenSSL Ed25519/Ed448 use one-shot DigestSign semantics.
+	 * Do not wrap an unexpected method implementation.
+	 */
+	if (state->kind == P11_ECX_EDDSA &&
+			!(original_flags & EVP_PKEY_FLAG_SIGCTX_CUSTOM))
+		return NULL;
+
+	state->method = EVP_PKEY_meth_new(state->type, original_flags);
+	if (state->method == NULL)
+		return NULL;
+
+	/*
+	 * Start with the complete OpenSSL implementation so that ctrl,
+	 * keygen, cleanup, peer-key handling, etc. remain unchanged.
+	 */
+	EVP_PKEY_meth_copy(state->method, original);
+
+	switch (state->kind) {
+	case P11_ECX_EDDSA:
+		/*
+		 * EVP_PKEY_sign() is useful for the ENGINE interface even though
+		 * the native OpenSSL EdDSA implementation primarily uses the
+		 * one-shot digestsign callback.
+		 */
+		EVP_PKEY_meth_get_sign(original, &state->original_init,
+			&state->original_sign);
+
+		EVP_PKEY_meth_get_digestsign(original, &state->original_digestsign);
+
+		if (state->original_digestsign == NULL)
+			goto error;
+
+		EVP_PKEY_meth_set_sign(state->method, state->original_init,
+			pkcs11_ecx_sign);
+
+		EVP_PKEY_meth_set_digestsign(state->method, pkcs11_ecx_digestsign);
+		break;
+
+	case P11_ECX_XDH:
+		EVP_PKEY_meth_get_derive(original, &state->original_init,
+			&state->original_derive);
+
+		if (state->original_derive == NULL)
+			goto error;
+
+		EVP_PKEY_meth_set_derive(state->method, state->original_init,
+			pkcs11_ecx_derive);
+		break;
+
+	default:
+		goto error;
+	}
+
+	return state->method;
+
+error:
+	EVP_PKEY_meth_free(state->method);
+	ecx_method_reset(state);
+	return NULL;
+}
+
+#endif /* LIBP11_HAVE_ECX_METHODS */
 
 #ifndef OPENSSL_NO_EC
 static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
@@ -1677,59 +1930,6 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method_ec(void)
 }
 #endif /* OPENSSL_NO_EC */
 
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
-static EVP_PKEY_METHOD *pkcs11_pkey_method_ed25519(void)
-{
-	EVP_PKEY_METHOD *new_meth;
-#if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
-	EVP_PKEY_METHOD *orig_meth = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(EVP_PKEY_ED25519);
-#else
-	const EVP_PKEY_METHOD *orig_meth = EVP_PKEY_meth_find(EVP_PKEY_ED25519);
-#endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
-
-	/* The digestsign() method is used to generate a signature in a one-shot mode */
-	EVP_PKEY_meth_get_digestsign(orig_meth, &orig_pkey_ed25519_digestsign);
-	
-	/* Don't assume any digest related defaults */
-	new_meth = EVP_PKEY_meth_new(EVP_PKEY_ED25519, EVP_PKEY_FLAG_SIGCTX_CUSTOM);
-
-	/* Duplicate the original method */
-	EVP_PKEY_meth_copy(new_meth, orig_meth);
-
-	/* Override selected ED25519 method callbacks with PKCS#11 implementations */
-	EVP_PKEY_meth_set_sign(new_meth, NULL, pkcs11_eddsa_pmeth_sign);
-	EVP_PKEY_meth_set_digestsign(new_meth, pkcs11_pkey_ed25519_digestsign);
-	EVP_PKEY_meth_set_ctrl(new_meth, pkcs11_eddsa_pmeth_ctrl, NULL);
-
-	return new_meth;
-}
-
-static EVP_PKEY_METHOD *pkcs11_pkey_method_ed448(void)
-{
-	EVP_PKEY_METHOD *new_meth;
-#if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
-	EVP_PKEY_METHOD *orig_meth = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(EVP_PKEY_ED448);
-#else
-	const EVP_PKEY_METHOD *orig_meth = EVP_PKEY_meth_find(EVP_PKEY_ED448);
-#endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
-
-	/* The digestsign() method is used to generate a signature in a one-shot mode */
-	EVP_PKEY_meth_get_digestsign(orig_meth, &orig_pkey_ed448_digestsign);
-
-	/* Don't assume any digest related defaults */
-	new_meth = EVP_PKEY_meth_new(EVP_PKEY_ED448, EVP_PKEY_FLAG_SIGCTX_CUSTOM);
-
-	/* Duplicate the original method */
-	EVP_PKEY_meth_copy(new_meth, orig_meth);
-
-	/* Override selected ED448 method callbacks with PKCS#11 implementations */
-	EVP_PKEY_meth_set_sign(new_meth, NULL, pkcs11_eddsa_pmeth_sign);
-	EVP_PKEY_meth_set_digestsign(new_meth, pkcs11_pkey_ed448_digestsign);
-	EVP_PKEY_meth_set_ctrl(new_meth, pkcs11_eddsa_pmeth_ctrl, NULL);
-
-	return new_meth;
-}
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 		const int **nids, int nid)
@@ -1739,20 +1939,18 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 #ifndef OPENSSL_NO_EC
 		EVP_PKEY_EC,
 #endif /* OPENSSL_NO_EC */
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
+#ifdef LIBP11_HAVE_ECX_METHODS
 		EVP_PKEY_ED25519,
 		EVP_PKEY_ED448,
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
+		EVP_PKEY_X25519,
+		EVP_PKEY_X448,
+#endif /* LIBP11_HAVE_ECX_METHODS */
 		0
 	};
 	static EVP_PKEY_METHOD *pkey_method_rsa = NULL;
 #ifndef OPENSSL_NO_EC
 	static EVP_PKEY_METHOD *pkey_method_ec = NULL;
 #endif /* OPENSSL_NO_EC */
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
-	static EVP_PKEY_METHOD *pkey_method_ed448 = NULL;
-	static EVP_PKEY_METHOD *pkey_method_ed25519 = NULL;
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 	(void)e; /* squash the unused parameter warning */
 	/* all PKCS#11 engines currently share the same pkey_meths */
@@ -1780,22 +1978,14 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 		*pmeth = pkey_method_ec;
 		return 1; /* success */
 #endif /* OPENSSL_NO_EC */
-#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
-	case EVP_PKEY_ED448:
-		if (!pkey_method_ed448)
-			pkey_method_ed448 = pkcs11_pkey_method_ed448();
-		if (!pkey_method_ed448)
-			return 0;
-		*pmeth = pkey_method_ed448;
-		return 1; /* success */
+#ifdef LIBP11_HAVE_ECX_METHODS
 	case EVP_PKEY_ED25519:
-		if (!pkey_method_ed25519)
-			pkey_method_ed25519 = pkcs11_pkey_method_ed25519();
-		if (!pkey_method_ed25519)
-			return 0;
-		*pmeth = pkey_method_ed25519;
-		return 1; /* success */
-#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
+	case EVP_PKEY_ED448:
+	case EVP_PKEY_X25519:
+	case EVP_PKEY_X448:
+		*pmeth = pkcs11_pkey_method_ecx(nid);
+		return *pmeth != NULL;
+#endif /* LIBP11_HAVE_ECX_METHODS */
 	}
 	*pmeth = NULL;
 	return 0;
