@@ -234,6 +234,21 @@ generate_rsa_key_pair () {
 	fi
 }
 
+# Generate an Ed25519 key pair
+generate_ed25519_key_pair () {
+	local obj_label="$1"
+	local token_label="$2"
+	local obj_id="${3:-${ID}}"
+
+	echo "* Generating an Ed25519 key pair on the token ${token_label}"
+	pkcs11-tool --login --pin ${PIN} --module ${MODULE} --id ${obj_id} \
+		--keypairgen --key-type "EC:Ed25519" --usage-sign \
+		--label ${obj_label} --token-label ${token_label}
+	if [[ $? -ne 0 ]]; then
+		exit 1
+	fi
+}
+
 # Generate an EC key pair with derive usage on the prime256v1 curve
 generate_ec_derive_key_pair () {
 	local obj_label="$1"

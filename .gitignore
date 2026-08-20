@@ -95,6 +95,7 @@ tests/rsa-keygen
 tests/ec-keygen
 tests/ec-derive
 tests/ec-derive-prov
+tests/ed25519-software-key
 tests/ed25519-keygen
 tests/ed448-keygen
 tests/ed25519-keygen-prov

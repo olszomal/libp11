@@ -22,6 +22,7 @@ check_PROGRAMS = \
 	rsa-oaep \
 	rsa-oaep-prov \
 	rsa-software-key \
+	ed25519-software-key \
 	check-privkey \
 	check-privkey-prov \
 	dup-key \
@@ -60,6 +61,7 @@ dist_check_SCRIPTS = \
 	ec-derive.softhsm \
 	session-pool-test.sh \
 	session-pool-stress.softhsm \
+	ed25519-software-key.softhsm \
 	ed25519-keygen.softhsm \
 	ed448-keygen.softhsm \
 	fork-change-slot.softhsm \
