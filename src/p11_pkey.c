@@ -1,7 +1,7 @@
 /* libp11, a simple layer on top of PKCS#11 API
  * Copyright (C) 2017 Douglas E. Engert <deengert@gmail.com>
- * Copyright (C) 2017-2025 Michał Trojnara <Michal.Trojnara@stunnel.org>
- * Copyright © 2025 Mobi - Com Polska Sp. z o.o.
+ * Copyright (C) 2017-2026 Michał Trojnara <Michal.Trojnara@stunnel.org>
+ * Copyright © 2026 Mobi - Com Polska Sp. z o.o.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -56,42 +56,42 @@ static int (*orig_pkey_ec_sign) (EVP_PKEY_CTX *ctx,
 #define X25519_KEY_LEN  32
 #define X448_KEY_LEN    56
 
-typedef int (*P11_ECX_INIT_FN)(EVP_PKEY_CTX *);
-typedef int (*P11_ECX_SIGN_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *,
+typedef int (*P11_PKEY_INIT_FN)(EVP_PKEY_CTX *);
+typedef int (*P11_PKEY_SIGN_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *,
 	const unsigned char *, size_t);
-typedef int (*P11_ECX_DIGESTSIGN_FN)(EVP_MD_CTX *, unsigned char *, size_t *,
+typedef int (*P11_PKEY_DIGESTSIGN_FN)(EVP_MD_CTX *, unsigned char *, size_t *,
 	const unsigned char *, size_t);
-typedef int (*P11_ECX_DERIVE_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *);
+typedef int (*P11_PKEY_DERIVE_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *);
 
 typedef enum {
-	P11_ECX_EDDSA,
-	P11_ECX_XDH
-} P11_ECX_KIND;
+	P11_PKEY_EDDSA,
+	P11_PKEY_XDH
+} P11_PKEY_KIND;
 
 typedef struct {
 	int type;
-	P11_ECX_KIND kind;
+	P11_PKEY_KIND kind;
 	EVP_PKEY_METHOD *method;
-	P11_ECX_INIT_FN original_init;
-	P11_ECX_SIGN_FN original_sign;
-	P11_ECX_DIGESTSIGN_FN original_digestsign;
-	P11_ECX_DERIVE_FN original_derive;
-} P11_ECX_METHOD;
+	P11_PKEY_INIT_FN original_init;
+	P11_PKEY_SIGN_FN original_sign;
+	P11_PKEY_DIGESTSIGN_FN original_digestsign;
+	P11_PKEY_DERIVE_FN original_derive;
+} P11_PKEY_METHOD;
 
-static P11_ECX_METHOD ecx_methods[] = {
-	{ .type = EVP_PKEY_ED25519, .kind = P11_ECX_EDDSA },
-	{ .type = EVP_PKEY_ED448, .kind = P11_ECX_EDDSA },
-	{ .type = EVP_PKEY_X25519, .kind = P11_ECX_XDH },
-	{ .type = EVP_PKEY_X448, .kind = P11_ECX_XDH }
+static P11_PKEY_METHOD pkey_methods[] = {
+	{ .type = EVP_PKEY_ED25519, .kind = P11_PKEY_EDDSA },
+	{ .type = EVP_PKEY_ED448, .kind = P11_PKEY_EDDSA },
+	{ .type = EVP_PKEY_X25519, .kind = P11_PKEY_XDH },
+	{ .type = EVP_PKEY_X448, .kind = P11_PKEY_XDH }
 };
 
-static P11_ECX_METHOD *ecx_method_by_type(int type)
+static P11_PKEY_METHOD *pkey_method_by_type(int type)
 {
 	size_t i;
 
-	for (i = 0; i < sizeof(ecx_methods) / sizeof(ecx_methods[0]); i++) {
-		if (ecx_methods[i].type == type)
-			return &ecx_methods[i];
+	for (i = 0; i < sizeof(pkey_methods) / sizeof(pkey_methods[0]); i++) {
+		if (pkey_methods[i].type == type)
+			return &pkey_methods[i];
 	}
 	return NULL;
 }
@@ -403,12 +403,12 @@ const char *pkcs11_mechanism_name(CK_MECHANISM *mechanism)
  *
  * Returns: CKR_OK on success or PKCS#11 error code on failure
  */
-static int pkcs11_sign_with_mechanism(PKCS11_OBJECT_private *key,
+static CK_RV pkcs11_sign_with_mechanism(PKCS11_OBJECT_private *key,
 	CK_MECHANISM *mechanism,
 	unsigned char *sig, size_t *siglen,
 	const unsigned char *tbs, size_t tbslen)
 {
-	int rv = CKR_GENERAL_ERROR;
+	CK_RV rv = CKR_GENERAL_ERROR;
 	PKCS11_SLOT_private *slot;
 	PKCS11_CTX_private *ctx;
 	CK_SESSION_HANDLE session;
@@ -416,6 +416,9 @@ static int pkcs11_sign_with_mechanism(PKCS11_OBJECT_private *key,
 	CK_ULONG ck_tbslen;
 
 	if (key == NULL || mechanism == NULL || siglen == NULL || tbs == NULL)
+		return CKR_ARGUMENTS_BAD;
+
+	if (*siglen > (size_t)(CK_ULONG)-1 || tbslen > (size_t)(CK_ULONG)-1)
 		return CKR_ARGUMENTS_BAD;
 
 	slot = key->slot;
@@ -458,14 +461,14 @@ static int pkcs11_sign_with_mechanism(PKCS11_OBJECT_private *key,
 			rv = CRYPTOKI_call(ctx,
 				C_Encrypt(session, (CK_BYTE_PTR)tbs, ck_tbslen, sig, &ck_siglen));
 		if (rv != CKR_OK) {
-			pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Encrypt rv=%d\n",
-				__FILE__, __LINE__, rv);
+			pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Encrypt rv=0x%08lX (%lu)\n",
+				__FILE__, __LINE__, (unsigned long)rv, (unsigned long)rv);
 			goto end;
 		}
 	}
 	if (rv != CKR_OK) {
-		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Sign rv=%d\n",
-			__FILE__, __LINE__, rv);
+		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Sign rv=0x%08lX (%lu)\n",
+			__FILE__, __LINE__, (unsigned long)rv, (unsigned long)rv);
 		goto end;
 	}
 
@@ -482,12 +485,12 @@ end:
  *
  * Returns: CKR_OK on success or PKCS#11 error code on failure
  */
-static int pkcs11_verify_with_mechanism(PKCS11_OBJECT_private *key,
+static CK_RV pkcs11_verify_with_mechanism(PKCS11_OBJECT_private *key,
 	CK_MECHANISM *mechanism,
 	const unsigned char *sig, size_t siglen,
 	const unsigned char *tbs, size_t tbslen)
 {
-	int rv = CKR_GENERAL_ERROR;
+	CK_RV rv = CKR_GENERAL_ERROR;
 	PKCS11_SLOT_private *slot;
 	PKCS11_CTX_private *ctx;
 	CK_SESSION_HANDLE session;
@@ -495,6 +498,9 @@ static int pkcs11_verify_with_mechanism(PKCS11_OBJECT_private *key,
 	CK_ULONG ck_tbslen;
 
 	if (key == NULL || mechanism == NULL || sig == NULL || tbs == NULL)
+		return CKR_ARGUMENTS_BAD;
+
+	if (siglen > (size_t)(CK_ULONG)-1 || tbslen > (size_t)(CK_ULONG)-1)
 		return CKR_ARGUMENTS_BAD;
 
 	slot = key->slot;
@@ -521,8 +527,8 @@ static int pkcs11_verify_with_mechanism(PKCS11_OBJECT_private *key,
 	rv = CRYPTOKI_call(ctx,
 		C_VerifyInit(session, mechanism, key->object));
 	if (rv != CKR_OK) {
-		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_VerifyInit rv=%d\n",
-			__FILE__, __LINE__, rv);
+		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_VerifyInit rv=0x%08lX (%lu)\n",
+			__FILE__, __LINE__, (unsigned long)rv, (unsigned long)rv);
 		goto end;
 	}
 
@@ -531,8 +537,8 @@ static int pkcs11_verify_with_mechanism(PKCS11_OBJECT_private *key,
 			(CK_BYTE_PTR)tbs, ck_tbslen,
 			(CK_BYTE_PTR)sig, ck_siglen));
 	if (rv != CKR_OK) {
-		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Verify rv=%d\n",
-			__FILE__, __LINE__, rv);
+		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Verify rv=0x%08lX (%lu)\n",
+			__FILE__, __LINE__, (unsigned long)rv, (unsigned long)rv);
 		goto end;
 	}
 
@@ -546,12 +552,12 @@ end:
  * Execute a PKCS#11 decryption operation using the specified mechanism.
  * Returns: CKR_OK on success or PKCS#11 error code on failure.
  */
-static int pkcs11_decrypt_with_mechanism(PKCS11_OBJECT_private *key,
+static CK_RV pkcs11_decrypt_with_mechanism(PKCS11_OBJECT_private *key,
 	CK_MECHANISM *mechanism,
 	unsigned char *out, size_t *outlen,
 	const unsigned char *in, size_t inlen)
 {
-	int rv = CKR_GENERAL_ERROR;
+	CK_RV rv = CKR_GENERAL_ERROR;
 	PKCS11_SLOT_private *slot;
 	PKCS11_CTX_private *ctx;
 	CK_SESSION_HANDLE session;
@@ -559,6 +565,9 @@ static int pkcs11_decrypt_with_mechanism(PKCS11_OBJECT_private *key,
 	CK_ULONG ck_inlen;
 
 	if (key == NULL || mechanism == NULL || outlen == NULL || in == NULL)
+		return CKR_ARGUMENTS_BAD;
+
+	if (*outlen > (size_t)(CK_ULONG)-1 || inlen > (size_t)(CK_ULONG)-1)
 		return CKR_ARGUMENTS_BAD;
 
 	slot = key->slot;
@@ -584,8 +593,8 @@ static int pkcs11_decrypt_with_mechanism(PKCS11_OBJECT_private *key,
 
 	rv = CRYPTOKI_call(ctx, C_DecryptInit(session, mechanism, key->object));
 	if (rv != CKR_OK) {
-		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_DecryptInit rv=%d\n",
-			__FILE__, __LINE__, rv);
+		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_DecryptInit rv=0x%08lX (%lu)\n",
+			__FILE__, __LINE__, (unsigned long)rv, (unsigned long)rv);
 		goto end;
 	}
 
@@ -598,8 +607,8 @@ static int pkcs11_decrypt_with_mechanism(PKCS11_OBJECT_private *key,
 	rv = CRYPTOKI_call(ctx,
 		C_Decrypt(session, (CK_BYTE_PTR)in, ck_inlen, out, &ck_outlen));
 	if (rv != CKR_OK) {
-		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Decrypt rv=%d\n",
-			__FILE__, __LINE__, rv);
+		pkcs11_log(ctx, LOG_DEBUG, "%s:%d C_Decrypt rv=0x%08lX (%lu)\n",
+			__FILE__, __LINE__, (unsigned long)rv, (unsigned long)rv);
 		goto end;
 	}
 
@@ -707,7 +716,6 @@ end:
 	return rv;
 }
 
-#ifndef OPENSSL_NO_EC
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /*
  * Execute a PKCS#11 decapsulation operation using the specified mechanism.
@@ -835,6 +843,7 @@ end:
 }
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
+#ifndef OPENSSL_NO_EC
 /* DER-encode data as an ASN.1 OCTET STRING. */
 static unsigned char *der_encode_octet_string(const unsigned char *data,
 	size_t data_len, size_t *der_len)
@@ -1298,7 +1307,7 @@ int pkcs11_evp_pkey_rsa_decrypt(PKCS11_OBJECT_private *key,
 	PKCS11_SLOT_private *slot;
 	PKCS11_CTX_private *ctx;
 	CK_RSA_PKCS_OAEP_PARAMS oaep_params;
-	int rv;
+	CK_RV rv;
 
 	if (key == NULL || outlen == NULL || in == NULL)
 		return -1;
@@ -1498,17 +1507,16 @@ static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 	EVP_PKEY *pkey;
 	EC_KEY *eckey;
 	PKCS11_OBJECT_private *key;
-	PKCS11_SLOT_private *slot;
-	CK_SESSION_HANDLE session;
-	const EVP_MD *sig_md;
+	const EVP_MD *sig_md = NULL;
 
-	if (!evp_pkey_ctx)
+	if (!evp_pkey_ctx || !siglen)
 		return -1;
 
 	if (EVP_PKEY_CTX_get_signature_md(evp_pkey_ctx, &sig_md) <= 0)
 		return -1;
 
-	if (tbslen < (size_t)EVP_MD_size(sig_md))
+	if (sig_md != NULL && EVP_MD_size(sig_md) > 0 &&
+			tbslen < (size_t)EVP_MD_size(sig_md))
 		return -1;
 
 	pkey = EVP_PKEY_CTX_get0_pkey(evp_pkey_ctx);
@@ -1533,15 +1541,6 @@ static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 
 	if (check_object_fork(key) < 0)
 		return -1;
-
-	slot = key->slot;
-	if (!slot)
-		return -1;
-
-	if (pkcs11_session_pool_acquire(slot, 0, &session))
-		return -1;
-
-	pkcs11_session_pool_release(slot, session);
 
 	return pkcs11_evp_pkey_ec_sign(key, sig, siglen, tbs, tbslen);
 }
@@ -1722,15 +1721,15 @@ static int pkcs11_ecx_sign(EVP_PKEY_CTX *ctx, unsigned char *sig,
 	size_t *siglen, const unsigned char *tbs, size_t tbslen)
 {
 	EVP_PKEY *pkey = NULL;
-	P11_ECX_METHOD *state = NULL;
+	P11_PKEY_METHOD *state = NULL;
 	int ret;
 
 	if (ctx != NULL)
 		pkey = EVP_PKEY_CTX_get0_pkey(ctx);
 	if (pkey != NULL)
-		state = ecx_method_by_type(EVP_PKEY_get_id(pkey));
+		state = pkey_method_by_type(EVP_PKEY_get_id(pkey));
 
-	if (state == NULL || state->kind != P11_ECX_EDDSA)
+	if (state == NULL || state->kind != P11_PKEY_EDDSA)
 		return 0;
 
 	ret = pkcs11_eddsa_pmeth_sign(ctx, sig, siglen, tbs, tbslen);
@@ -1746,7 +1745,7 @@ static int pkcs11_ecx_digestsign(EVP_MD_CTX *mdctx,
 {
 	EVP_PKEY_CTX *ctx = NULL;
 	EVP_PKEY *pkey = NULL;
-	P11_ECX_METHOD *state = NULL;
+	P11_PKEY_METHOD *state = NULL;
 	int ret;
 
 	if (mdctx != NULL)
@@ -1754,9 +1753,9 @@ static int pkcs11_ecx_digestsign(EVP_MD_CTX *mdctx,
 	if (ctx != NULL)
 		pkey = EVP_PKEY_CTX_get0_pkey(ctx);
 	if (pkey != NULL)
-		state = ecx_method_by_type(EVP_PKEY_get_id(pkey));
+		state = pkey_method_by_type(EVP_PKEY_get_id(pkey));
 
-	if (state == NULL || state->kind != P11_ECX_EDDSA)
+	if (state == NULL || state->kind != P11_PKEY_EDDSA)
 		return 0;
 
 	ret = pkcs11_eddsa_pmeth_digestsign(mdctx, sig, siglen, tbs, tbslen);
@@ -1770,15 +1769,15 @@ static int pkcs11_ecx_derive(EVP_PKEY_CTX *ctx,
 	unsigned char *secret, size_t *secretlen)
 {
 	EVP_PKEY *pkey = NULL;
-	P11_ECX_METHOD *state = NULL;
+	P11_PKEY_METHOD *state = NULL;
 	int ret;
 
 	if (ctx != NULL)
 		pkey = EVP_PKEY_CTX_get0_pkey(ctx);
 	if (pkey != NULL)
-		state = ecx_method_by_type(EVP_PKEY_get_id(pkey));
+		state = pkey_method_by_type(EVP_PKEY_get_id(pkey));
 
-	if (state == NULL || state->kind != P11_ECX_XDH)
+	if (state == NULL || state->kind != P11_PKEY_XDH)
 		return 0;
 
 	ret = pkcs11_xdh_pmeth_derive(ctx, secret, secretlen);
@@ -1788,7 +1787,7 @@ static int pkcs11_ecx_derive(EVP_PKEY_CTX *ctx,
 	return ret;
 }
 
-static void ecx_method_reset(P11_ECX_METHOD *state)
+static void pkey_method_reset(P11_PKEY_METHOD *state)
 {
 	state->method = NULL;
 	state->original_init = NULL;
@@ -1798,19 +1797,19 @@ static void ecx_method_reset(P11_ECX_METHOD *state)
 }
 
 /*
- * Build an ENGINE-scoped ECX EVP_PKEY_METHOD.
+ * Build an ENGINE-scoped EVP_PKEY_METHOD.
  *
  * This follows p11_ecx.c's copy-and-override model, but deliberately does
  * not call EVP_PKEY_meth_add0(): the wrapper is returned only by the ENGINE.
  */
-static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
+static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 {
-	P11_ECX_METHOD *state;
+	P11_PKEY_METHOD *state;
 	const EVP_PKEY_METHOD *original;
 	int original_type;
 	int original_flags;
 
-	state = ecx_method_by_type(type);
+	state = pkey_method_by_type(type);
 	if (state == NULL)
 		return NULL;
 
@@ -1819,7 +1818,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
 		return state->method;
 
 	/*
-	 * ECX methods are wrappers around the original OpenSSL method.
+	 * PKEY methods are wrappers around the original OpenSSL method.
 	 * Preserve all callbacks that are not explicitly overridden below.
 	 */
 	original = EVP_PKEY_meth_find(state->type);
@@ -1834,7 +1833,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
 	 * OpenSSL Ed25519/Ed448 use one-shot DigestSign semantics.
 	 * Do not wrap an unexpected method implementation.
 	 */
-	if (state->kind == P11_ECX_EDDSA &&
+	if (state->kind == P11_PKEY_EDDSA &&
 			!(original_flags & EVP_PKEY_FLAG_SIGCTX_CUSTOM))
 		return NULL;
 
@@ -1849,7 +1848,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
 	EVP_PKEY_meth_copy(state->method, original);
 
 	switch (state->kind) {
-	case P11_ECX_EDDSA:
+	case P11_PKEY_EDDSA:
 		/*
 		 * EVP_PKEY_sign() is useful for the ENGINE interface even though
 		 * the native OpenSSL EdDSA implementation primarily uses the
@@ -1869,7 +1868,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
 		EVP_PKEY_meth_set_digestsign(state->method, pkcs11_ecx_digestsign);
 		break;
 
-	case P11_ECX_XDH:
+	case P11_PKEY_XDH:
 		EVP_PKEY_meth_get_derive(original, &state->original_init,
 			&state->original_derive);
 
@@ -1888,7 +1887,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method_ecx(int type)
 
 error:
 	EVP_PKEY_meth_free(state->method);
-	ecx_method_reset(state);
+	pkey_method_reset(state);
 	return NULL;
 }
 
@@ -1910,16 +1909,29 @@ static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 static EVP_PKEY_METHOD *pkcs11_pkey_method_ec(void)
 {
 	EVP_PKEY_METHOD *new_meth;
+	int orig_type = EVP_PKEY_EC;
+	int orig_flags = 0;
 #if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
 	EVP_PKEY_METHOD *orig_meth = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(EVP_PKEY_EC);
 #else
 	const EVP_PKEY_METHOD *orig_meth = EVP_PKEY_meth_find(EVP_PKEY_EC);
 #endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
 
+	if (orig_meth == NULL)
+		return NULL;
+
+	EVP_PKEY_meth_get0_info(&orig_type, &orig_flags, orig_meth);
+	if (orig_type != EVP_PKEY_EC)
+		return NULL;
+
 	EVP_PKEY_meth_get_sign(orig_meth,
 		&orig_pkey_ec_sign_init, &orig_pkey_ec_sign);
+	if (orig_pkey_ec_sign == NULL)
+		return NULL;
 
-	new_meth = EVP_PKEY_meth_new(EVP_PKEY_EC, 0);
+	new_meth = EVP_PKEY_meth_new(EVP_PKEY_EC, orig_flags);
+	if (new_meth == NULL)
+		return NULL;
 
 	EVP_PKEY_meth_copy(new_meth, orig_meth);
 
@@ -1956,9 +1968,13 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 	/* all PKCS#11 engines currently share the same pkey_meths */
 
 	if (!pmeth) { /* get the list of supported nids */
+		if (nids == NULL)
+			return 0;
 		*nids = pkey_nids;
 		return sizeof(pkey_nids) / sizeof(int) - 1;
 	}
+
+	*pmeth = NULL;
 
 	/* get the EVP_PKEY_METHOD */
 	switch (nid) {
@@ -1983,7 +1999,7 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 	case EVP_PKEY_ED448:
 	case EVP_PKEY_X25519:
 	case EVP_PKEY_X448:
-		*pmeth = pkcs11_pkey_method_ecx(nid);
+		*pmeth = pkcs11_pkey_method(nid);
 		return *pmeth != NULL;
 #endif /* LIBP11_HAVE_ECX_METHODS */
 	}
