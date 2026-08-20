@@ -645,7 +645,6 @@ static CK_RV pkcs11_derive_with_mechanism(PKCS11_OBJECT_private *key,
 		{CKA_VALUE_LEN, &newkey_len, sizeof(newkey_len)},
 		{CKA_SENSITIVE, &ck_false, sizeof(ck_false)},
 		{CKA_EXTRACTABLE, &ck_true, sizeof(ck_true)},
-		{CKA_DERIVE, &ck_true, sizeof(ck_true)},
 	};
 
 	if (key == NULL || mechanism == NULL || secret == NULL ||
