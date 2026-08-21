@@ -41,20 +41,15 @@
 #define LIBP11_HAVE_ECX_METHODS
 #endif
 
-#if OPENSSL_VERSION_NUMBER < 0x40000000L
-# ifndef OPENSSL_NO_EC
-static int (*orig_pkey_ec_sign_init) (EVP_PKEY_CTX *ctx);
-static int (*orig_pkey_ec_sign) (EVP_PKEY_CTX *ctx,
-	unsigned char *sig, size_t *siglen,
-	const unsigned char *tbs, size_t tbslen);
-# endif /* OPENSSL_NO_EC */
-#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
-
 #ifdef LIBP11_HAVE_ECX_METHODS
 #define ED25519_SIG_LEN 64
 #define ED448_SIG_LEN   114
 #define X25519_KEY_LEN  32
 #define X448_KEY_LEN    56
+#endif /* LIBP11_HAVE_ECX_METHODS */
+
+#if OPENSSL_VERSION_NUMBER < 0x40000000L && \
+	(!defined(OPENSSL_NO_EC) || defined(LIBP11_HAVE_ECX_METHODS))
 
 typedef int (*P11_PKEY_INIT_FN)(EVP_PKEY_CTX *);
 typedef int (*P11_PKEY_SIGN_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *,
@@ -64,8 +59,13 @@ typedef int (*P11_PKEY_DIGESTSIGN_FN)(EVP_MD_CTX *, unsigned char *, size_t *,
 typedef int (*P11_PKEY_DERIVE_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *);
 
 typedef enum {
+#ifndef OPENSSL_NO_EC
+	P11_PKEY_EC,
+#endif /* OPENSSL_NO_EC */
+#ifdef LIBP11_HAVE_ECX_METHODS
 	P11_PKEY_EDDSA,
 	P11_PKEY_XDH
+#endif /* LIBP11_HAVE_ECX_METHODS */
 } P11_PKEY_KIND;
 
 typedef struct {
@@ -79,10 +79,15 @@ typedef struct {
 } P11_PKEY_METHOD;
 
 static P11_PKEY_METHOD pkey_methods[] = {
+#ifndef OPENSSL_NO_EC
+	{ .type = EVP_PKEY_EC, .kind = P11_PKEY_EC },
+#endif /* OPENSSL_NO_EC */
+#ifdef LIBP11_HAVE_ECX_METHODS
 	{ .type = EVP_PKEY_ED25519, .kind = P11_PKEY_EDDSA },
 	{ .type = EVP_PKEY_ED448, .kind = P11_PKEY_EDDSA },
 	{ .type = EVP_PKEY_X25519, .kind = P11_PKEY_XDH },
 	{ .type = EVP_PKEY_X448, .kind = P11_PKEY_XDH }
+#endif /* LIBP11_HAVE_ECX_METHODS */
 };
 
 static P11_PKEY_METHOD *pkey_method_by_type(int type)
@@ -95,7 +100,7 @@ static P11_PKEY_METHOD *pkey_method_by_type(int type)
 	}
 	return NULL;
 }
-#endif /* LIBP11_HAVE_ECX_METHODS */
+#endif
 
 #if OPENSSL_VERSION_NUMBER < 0x10002000L || defined(LIBRESSL_VERSION_NUMBER)
 
@@ -1543,6 +1548,10 @@ static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 
 	return pkcs11_evp_pkey_ec_sign(key, sig, siglen, tbs, tbslen);
 }
+
+static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *sig, size_t *siglen,
+		const unsigned char *tbs, size_t tbslen);
 #endif /* OPENSSL_NO_EC */
 
 #ifdef LIBP11_HAVE_ECX_METHODS
@@ -1786,6 +1795,9 @@ static int pkcs11_ecx_derive(EVP_PKEY_CTX *ctx,
 	return ret;
 }
 
+#endif /* LIBP11_HAVE_ECX_METHODS */
+
+#if !defined(OPENSSL_NO_EC) || defined(LIBP11_HAVE_ECX_METHODS)
 static void pkey_method_reset(P11_PKEY_METHOD *state)
 {
 	state->method = NULL;
@@ -1804,7 +1816,11 @@ static void pkey_method_reset(P11_PKEY_METHOD *state)
 static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 {
 	P11_PKEY_METHOD *state;
+#if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
+	EVP_PKEY_METHOD *original;
+#else
 	const EVP_PKEY_METHOD *original;
+#endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
 	int original_type;
 	int original_flags;
 
@@ -1828,6 +1844,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	if (original_type != state->type)
 		return NULL;
 
+#ifdef LIBP11_HAVE_ECX_METHODS
 	/*
 	 * OpenSSL Ed25519/Ed448 use one-shot DigestSign semantics.
 	 * Do not wrap an unexpected method implementation.
@@ -1835,6 +1852,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	if (state->kind == P11_PKEY_EDDSA &&
 			!(original_flags & EVP_PKEY_FLAG_SIGCTX_CUSTOM))
 		return NULL;
+#endif /* LIBP11_HAVE_ECX_METHODS */
 
 	state->method = EVP_PKEY_meth_new(state->type, original_flags);
 	if (state->method == NULL)
@@ -1847,6 +1865,20 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	EVP_PKEY_meth_copy(state->method, original);
 
 	switch (state->kind) {
+#ifndef OPENSSL_NO_EC
+	case P11_PKEY_EC:
+		EVP_PKEY_meth_get_sign(original, &state->original_init,
+			&state->original_sign);
+
+		if (state->original_sign == NULL)
+			goto error;
+
+		EVP_PKEY_meth_set_sign(state->method, state->original_init,
+			pkcs11_pkey_ec_sign);
+		break;
+#endif /* OPENSSL_NO_EC */
+
+#ifdef LIBP11_HAVE_ECX_METHODS
 	case P11_PKEY_EDDSA:
 		/*
 		 * EVP_PKEY_sign() is useful for the ENGINE interface even though
@@ -1877,6 +1909,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		EVP_PKEY_meth_set_derive(state->method, state->original_init,
 			pkcs11_ecx_derive);
 		break;
+#endif /* LIBP11_HAVE_ECX_METHODS */
 
 	default:
 		goto error;
@@ -1889,55 +1922,25 @@ error:
 	pkey_method_reset(state);
 	return NULL;
 }
+#endif
 
-#endif /* LIBP11_HAVE_ECX_METHODS */
 
 #ifndef OPENSSL_NO_EC
 static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		unsigned char *sig, size_t *siglen,
 		const unsigned char *tbs, size_t tbslen)
 {
+	P11_PKEY_METHOD *state;
 	int ret;
 
+	state = pkey_method_by_type(EVP_PKEY_EC);
+	if (state == NULL || state->kind != P11_PKEY_EC)
+		return 0;
+
 	ret = pkcs11_try_pkey_ec_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
-	if (ret < 0)
-		ret = (*orig_pkey_ec_sign)(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	if (ret < 0 && state->original_sign != NULL)
+		ret = state->original_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
 	return ret;
-}
-
-static EVP_PKEY_METHOD *pkcs11_pkey_method_ec(void)
-{
-	EVP_PKEY_METHOD *new_meth;
-	int orig_type = EVP_PKEY_EC;
-	int orig_flags = 0;
-#if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
-	EVP_PKEY_METHOD *orig_meth = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(EVP_PKEY_EC);
-#else
-	const EVP_PKEY_METHOD *orig_meth = EVP_PKEY_meth_find(EVP_PKEY_EC);
-#endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
-
-	if (orig_meth == NULL)
-		return NULL;
-
-	EVP_PKEY_meth_get0_info(&orig_type, &orig_flags, orig_meth);
-	if (orig_type != EVP_PKEY_EC)
-		return NULL;
-
-	EVP_PKEY_meth_get_sign(orig_meth,
-		&orig_pkey_ec_sign_init, &orig_pkey_ec_sign);
-	if (orig_pkey_ec_sign == NULL)
-		return NULL;
-
-	new_meth = EVP_PKEY_meth_new(EVP_PKEY_EC, orig_flags);
-	if (new_meth == NULL)
-		return NULL;
-
-	EVP_PKEY_meth_copy(new_meth, orig_meth);
-
-	EVP_PKEY_meth_set_sign(new_meth,
-		orig_pkey_ec_sign_init, pkcs11_pkey_ec_sign);
-
-	return new_meth;
 }
 #endif /* OPENSSL_NO_EC */
 
@@ -1959,9 +1962,6 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 		0
 	};
 	static EVP_PKEY_METHOD *pkey_method_rsa = NULL;
-#ifndef OPENSSL_NO_EC
-	static EVP_PKEY_METHOD *pkey_method_ec = NULL;
-#endif /* OPENSSL_NO_EC */
 
 	(void)e; /* squash the unused parameter warning */
 	/* all PKCS#11 engines currently share the same pkey_meths */
@@ -1984,25 +1984,22 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 			return 0;
 		*pmeth = pkey_method_rsa;
 		return 1; /* success */
+
+#if !defined(OPENSSL_NO_EC) || defined(LIBP11_HAVE_ECX_METHODS)
 #ifndef OPENSSL_NO_EC
 	case EVP_PKEY_EC:
-		if (!pkey_method_ec)
-			pkey_method_ec = pkcs11_pkey_method_ec();
-		if (!pkey_method_ec)
-			return 0;
-		*pmeth = pkey_method_ec;
-		return 1; /* success */
 #endif /* OPENSSL_NO_EC */
 #ifdef LIBP11_HAVE_ECX_METHODS
 	case EVP_PKEY_ED25519:
 	case EVP_PKEY_ED448:
 	case EVP_PKEY_X25519:
 	case EVP_PKEY_X448:
+#endif /* LIBP11_HAVE_ECX_METHODS */
 		*pmeth = pkcs11_pkey_method(nid);
 		return *pmeth != NULL;
-#endif /* LIBP11_HAVE_ECX_METHODS */
+#endif
 	}
-	*pmeth = NULL;
+
 	return 0;
 }
 
