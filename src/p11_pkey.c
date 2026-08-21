@@ -34,6 +34,13 @@
 #define RSA_PSS_SALTLEN_AUTO_DIGEST_MAX -4
 #endif
 
+
+/******************************************************************************/
+/* Legacy ENGINE EVP_PKEY_METHOD support                                      */
+/******************************************************************************/
+
+/* --- ENGINE method definitions and state ---------------------------------- */
+
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L && \
 	OPENSSL_VERSION_NUMBER < 0x40000000L && \
 	!defined(OPENSSL_NO_DEPRECATED_3_0) && \
@@ -48,17 +55,19 @@
 #define X448_KEY_LEN    56
 #endif /* LIBP11_HAVE_ECX_METHODS */
 
-#if OPENSSL_VERSION_NUMBER < 0x40000000L && \
-	(!defined(OPENSSL_NO_EC) || defined(LIBP11_HAVE_ECX_METHODS))
+#if OPENSSL_VERSION_NUMBER < 0x40000000L
 
 typedef int (*P11_PKEY_INIT_FN)(EVP_PKEY_CTX *);
 typedef int (*P11_PKEY_SIGN_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *,
+	const unsigned char *, size_t);
+typedef int (*P11_PKEY_DECRYPT_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *,
 	const unsigned char *, size_t);
 typedef int (*P11_PKEY_DIGESTSIGN_FN)(EVP_MD_CTX *, unsigned char *, size_t *,
 	const unsigned char *, size_t);
 typedef int (*P11_PKEY_DERIVE_FN)(EVP_PKEY_CTX *, unsigned char *, size_t *);
 
 typedef enum {
+	P11_PKEY_RSA,
 #ifndef OPENSSL_NO_EC
 	P11_PKEY_EC,
 #endif /* OPENSSL_NO_EC */
@@ -74,11 +83,14 @@ typedef struct {
 	EVP_PKEY_METHOD *method;
 	P11_PKEY_INIT_FN original_init;
 	P11_PKEY_SIGN_FN original_sign;
+	P11_PKEY_INIT_FN original_decrypt_init;
+	P11_PKEY_DECRYPT_FN original_decrypt;
 	P11_PKEY_DIGESTSIGN_FN original_digestsign;
 	P11_PKEY_DERIVE_FN original_derive;
 } P11_PKEY_METHOD;
 
 static P11_PKEY_METHOD pkey_methods[] = {
+	{ .type = EVP_PKEY_RSA, .kind = P11_PKEY_RSA },
 #ifndef OPENSSL_NO_EC
 	{ .type = EVP_PKEY_EC, .kind = P11_PKEY_EC },
 #endif /* OPENSSL_NO_EC */
@@ -100,6 +112,50 @@ static P11_PKEY_METHOD *pkey_method_by_type(int type)
 	}
 	return NULL;
 }
+#endif
+
+
+/* --- OpenSSL compatibility helpers ---------------------------------------- */
+
+#if OPENSSL_VERSION_NUMBER < 0x100020d0L || defined(LIBRESSL_VERSION_NUMBER)
+struct evp_pkey_method_st {
+    int pkey_id;
+    int flags;
+    int (*init) (EVP_PKEY_CTX *ctx);
+    int (*copy) (EVP_PKEY_CTX *dst, EVP_PKEY_CTX *src);
+    void (*cleanup) (EVP_PKEY_CTX *ctx);
+    int (*paramgen_init) (EVP_PKEY_CTX *ctx);
+    int (*paramgen) (EVP_PKEY_CTX *ctx, EVP_PKEY *pkey);
+    int (*keygen_init) (EVP_PKEY_CTX *ctx);
+    int (*keygen) (EVP_PKEY_CTX *ctx, EVP_PKEY *pkey);
+    int (*sign_init) (EVP_PKEY_CTX *ctx);
+    int (*sign) (EVP_PKEY_CTX *ctx, unsigned char *sig, size_t *siglen,
+                 const unsigned char *tbs, size_t tbslen);
+    int (*verify_init) (EVP_PKEY_CTX *ctx);
+    int (*verify) (EVP_PKEY_CTX *ctx,
+                   const unsigned char *sig, size_t siglen,
+                   const unsigned char *tbs, size_t tbslen);
+    int (*verify_recover_init) (EVP_PKEY_CTX *ctx);
+    int (*verify_recover) (EVP_PKEY_CTX *ctx,
+                           unsigned char *rout, size_t *routlen,
+                           const unsigned char *sig, size_t siglen);
+    int (*signctx_init) (EVP_PKEY_CTX *ctx, EVP_MD_CTX *mctx);
+    int (*signctx) (EVP_PKEY_CTX *ctx, unsigned char *sig, size_t *siglen,
+                    EVP_MD_CTX *mctx);
+    int (*verifyctx_init) (EVP_PKEY_CTX *ctx, EVP_MD_CTX *mctx);
+    int (*verifyctx) (EVP_PKEY_CTX *ctx, const unsigned char *sig, int siglen,
+                      EVP_MD_CTX *mctx);
+    int (*encrypt_init) (EVP_PKEY_CTX *ctx);
+    int (*encrypt) (EVP_PKEY_CTX *ctx, unsigned char *out, size_t *outlen,
+                    const unsigned char *in, size_t inlen);
+    int (*decrypt_init) (EVP_PKEY_CTX *ctx);
+    int (*decrypt) (EVP_PKEY_CTX *ctx, unsigned char *out, size_t *outlen,
+                    const unsigned char *in, size_t inlen);
+    int (*derive_init) (EVP_PKEY_CTX *ctx);
+    int (*derive) (EVP_PKEY_CTX *ctx, unsigned char *key, size_t *keylen);
+    int (*ctrl) (EVP_PKEY_CTX *ctx, int type, int p1, void *p2);
+    int (*ctrl_str) (EVP_PKEY_CTX *ctx, const char *type, const char *value);
+}; /* EVP_PKEY_METHOD */
 #endif
 
 #if OPENSSL_VERSION_NUMBER < 0x10002000L || defined(LIBRESSL_VERSION_NUMBER)
@@ -179,6 +235,45 @@ static void EVP_PKEY_meth_copy(EVP_PKEY_METHOD *dst, const EVP_PKEY_METHOD *src)
 
 #endif
 
+#if OPENSSL_VERSION_NUMBER < 0x100020d0L || defined(LIBRESSL_VERSION_NUMBER)
+void EVP_PKEY_meth_get_sign(EVP_PKEY_METHOD *pmeth,
+		int (**psign_init) (EVP_PKEY_CTX *ctx),
+		int (**psign) (EVP_PKEY_CTX *ctx,
+			unsigned char *sig, size_t *siglen,
+			const unsigned char *tbs, size_t tbslen))
+{
+	if (psign_init)
+		*psign_init = pmeth->sign_init;
+	if (psign)
+		*psign = pmeth->sign;
+}
+
+static void EVP_PKEY_meth_get_decrypt(EVP_PKEY_METHOD *pmeth,
+		int (**pdecrypt_init) (EVP_PKEY_CTX *ctx),
+		int (**pdecrypt) (EVP_PKEY_CTX *ctx,
+			unsigned char *out,
+			size_t *outlen,
+			const unsigned char *in,
+			size_t inlen))
+{
+	if (pdecrypt_init)
+		*pdecrypt_init = pmeth->decrypt_init;
+	if (pdecrypt)
+		*pdecrypt = pmeth->decrypt;
+}
+#endif
+
+
+/******************************************************************************/
+/* PKCS#11 cryptographic operations shared by ENGINE and provider code        */
+/******************************************************************************/
+
+/*
+ * Build PKCS#11 RSA-PSS parameters from the OpenSSL signing context.
+ *
+ * Resolve the signature and MGF1 digests, normalize OpenSSL salt-length
+ * values, and fill CK_RSA_PKCS_PSS_PARAMS for the PKCS#11 mechanism.
+ */
 static int pkcs11_params_pss(CK_RSA_PKCS_PSS_PARAMS *pss_params, EVP_PKEY *pkey,
 	int salt_len, const char *mdname, const char *mgf1_mdname,
 	PKCS11_CTX_private *pctx)
@@ -243,6 +338,12 @@ static int pkcs11_params_pss(CK_RSA_PKCS_PSS_PARAMS *pss_params, EVP_PKEY *pkey,
 	return 0;
 }
 
+/*
+ * Build PKCS#11 RSA-OAEP parameters from the OpenSSL decryption context.
+ *
+ * Resolve the OAEP and MGF1 digests, apply the default digest if needed,
+ * and fill CK_RSA_PKCS_OAEP_PARAMS including the optional OAEP label.
+ */
 static int pkcs11_oaep_param(CK_RSA_PKCS_OAEP_PARAMS *oaep_params,
 	const char *oaep_mdname, const char *mgf1_mdname,
 	unsigned char *oaep_label, size_t oaep_labellen,
@@ -258,7 +359,7 @@ static int pkcs11_oaep_param(CK_RSA_PKCS_OAEP_PARAMS *oaep_params,
 	if (oaep_md == NULL)
 		return -1;
 
-	/* mgf1 default = signature digest */
+	/* mgf1 default = OAEP digest */
 	if (mgf1_mdname == NULL)
 		mgf1_mdname = oaep_mdname;
 
@@ -1501,8 +1602,189 @@ extern int pkcs11_evp_pkey_ml_kem_decapsulate(PKCS11_OBJECT_private *key,
 }
 #endif /* !defined(OPENSSL_NO_ML_KEM) && OPENSSL_VERSION_NUMBER >= 0x30500000L */
 
+
+/******************************************************************************/
+/* Legacy ENGINE EVP_PKEY_METHOD callbacks and registration                   */
+/******************************************************************************/
+
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
+
+/* --- RSA ENGINE method callbacks ------------------------------------------ */
+
+/* Attempt to sign using the PKCS#11-backed RSA implementation */
+static int pkcs11_try_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *sig, size_t *siglen,
+		const unsigned char *tbs, size_t tbslen)
+{
+	EVP_PKEY *pkey;
+	RSA *rsa;
+	int padding;
+	PKCS11_OBJECT_private *key;
+	const EVP_MD *md, *mgf1_md;
+	const char *mdname, *mgf1_mdname;
+	int salt_len;
+
+	/* RSA method has EVP_PKEY_FLAG_AUTOARGLEN set. OpenSSL core will handle
+	 * the size inquiry internally. */
+	if (!sig)
+		return -1;
+
+	if (!evp_pkey_ctx)
+		return -1;
+
+	pkey = EVP_PKEY_CTX_get0_pkey(evp_pkey_ctx);
+	if (!pkey)
+		return -1;
+
+	rsa = (RSA *)EVP_PKEY_get0_RSA(pkey);
+	if (!rsa)
+		return -1;
+
+	key = pkcs11_get_ex_data_rsa(rsa);
+	if (!key)
+		return -1;
+
+	if (check_object_fork(key) < 0)
+		return -1;
+
+	/* retrieve PSS parameters */
+	if (EVP_PKEY_CTX_get_rsa_padding(evp_pkey_ctx, &padding) <= 0)
+		return -1;
+
+	if (padding != RSA_PKCS1_PSS_PADDING)
+		return -1; /* unsupported */
+
+	if (EVP_PKEY_CTX_get_signature_md(evp_pkey_ctx, &md) <= 0)
+		return -1;
+
+	if (tbslen != (size_t)EVP_MD_size(md))
+		return -1;
+
+	if (EVP_PKEY_CTX_get_rsa_mgf1_md(evp_pkey_ctx, &mgf1_md) <= 0)
+		return -1;
+
+	if (EVP_PKEY_CTX_get_rsa_pss_saltlen(evp_pkey_ctx, &salt_len) == 0)
+		return -1;
+
+	mdname = EVP_MD_name(md);
+	mgf1_mdname = EVP_MD_name(mgf1_md);
+
+	return pkcs11_evp_pkey_rsa_sign(key, pkey, mdname, padding,
+		salt_len, mgf1_mdname, sig, siglen, tbs, tbslen);
+}
+
+/* Attempt to decrypt using the PKCS#11-backed RSA implementation */
+static int pkcs11_try_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *out, size_t *outlen,
+		const unsigned char *in, size_t inlen)
+{
+	EVP_PKEY *pkey;
+	RSA *rsa;
+	int padding;
+	PKCS11_OBJECT_private *key;
+	const EVP_MD *md, *mgf1_md;
+	const char *mdname = NULL, *mgf1_mdname = NULL;
+	unsigned char *oaep_label = NULL;
+	int oaep_labellen = 0;
+
+	/* RSA method has EVP_PKEY_FLAG_AUTOARGLEN set. OpenSSL core will handle
+	 * the size inquiry internally. */
+	if (!out)
+		return -1;
+
+	if (!evp_pkey_ctx)
+		return -1;
+
+	pkey = EVP_PKEY_CTX_get0_pkey(evp_pkey_ctx);
+	if (!pkey)
+		return -1;
+
+	rsa = (RSA *)EVP_PKEY_get0_RSA(pkey);
+	if (!rsa)
+		return -1;
+
+	key = pkcs11_get_ex_data_rsa(rsa);
+	if (!key)
+		return -1;
+
+	if (check_object_fork(key) < 0)
+		return -1;
+
+	/* check RSA padding */
+	if (EVP_PKEY_CTX_get_rsa_padding(evp_pkey_ctx, &padding) <= 0)
+		return -1;
+
+	switch (padding) {
+	case RSA_PKCS1_PADDING:
+		break;
+
+	case RSA_PKCS1_OAEP_PADDING:
+		/* retrieve OAEP parameters */
+		if (EVP_PKEY_CTX_get_rsa_oaep_md(evp_pkey_ctx, &md) <= 0 ||
+				md == NULL)
+			return -1;
+
+		if (EVP_PKEY_CTX_get_rsa_mgf1_md(evp_pkey_ctx, &mgf1_md) <= 0 ||
+				mgf1_md == NULL)
+			return -1;
+
+		mdname = EVP_MD_name(md);
+		mgf1_mdname = EVP_MD_name(mgf1_md);
+
+		oaep_labellen = EVP_PKEY_CTX_get0_rsa_oaep_label(evp_pkey_ctx,
+			&oaep_label);
+		if (oaep_labellen < 0) {
+			oaep_labellen = 0;
+			oaep_label = NULL;
+		}
+		break;
+
+	default:
+		return -1;
+	}
+
+	return pkcs11_evp_pkey_rsa_decrypt(key, mdname, padding, mgf1_mdname,
+		oaep_label, oaep_labellen, out, outlen, in, inlen);
+}
+
+static int pkcs11_pkey_rsa_sign(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *sig, size_t *siglen,
+		const unsigned char *tbs, size_t tbslen)
+{
+	P11_PKEY_METHOD *state;
+	int ret;
+
+	state = pkey_method_by_type(EVP_PKEY_RSA);
+	if (state == NULL || state->kind != P11_PKEY_RSA)
+		return 0;
+
+	ret = pkcs11_try_pkey_rsa_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	if (ret < 0 && state->original_sign != NULL)
+		ret = state->original_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	return ret;
+}
+
+static int pkcs11_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
+		unsigned char *out, size_t *outlen,
+		const unsigned char *in, size_t inlen)
+{
+	P11_PKEY_METHOD *state;
+	int ret;
+
+	state = pkey_method_by_type(EVP_PKEY_RSA);
+	if (state == NULL || state->kind != P11_PKEY_RSA)
+		return 0;
+
+	ret = pkcs11_try_pkey_rsa_decrypt(evp_pkey_ctx, out, outlen, in, inlen);
+	if (ret < 0 && state->original_decrypt != NULL)
+		ret = state->original_decrypt(evp_pkey_ctx, out, outlen, in, inlen);
+	return ret;
+}
+
 #ifndef OPENSSL_NO_EC
+
+
+/* --- EC ENGINE method callbacks ------------------------------------------- */
 
 static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		unsigned char *sig, size_t *siglen,
@@ -1555,6 +1837,9 @@ static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 #endif /* OPENSSL_NO_EC */
 
 #ifdef LIBP11_HAVE_ECX_METHODS
+
+
+/* --- ECX ENGINE method callbacks ------------------------------------------ */
 
 /*
  * Try Ed25519/Ed448 signing through PKCS#11.
@@ -1797,29 +2082,32 @@ static int pkcs11_ecx_derive(EVP_PKEY_CTX *ctx,
 
 #endif /* LIBP11_HAVE_ECX_METHODS */
 
-#if !defined(OPENSSL_NO_EC) || defined(LIBP11_HAVE_ECX_METHODS)
+/* --- ENGINE method construction and registration ------------------------- */
+
+/* Reset cached ENGINE method and original OpenSSL callbacks. */
 static void pkey_method_reset(P11_PKEY_METHOD *state)
 {
 	state->method = NULL;
 	state->original_init = NULL;
 	state->original_sign = NULL;
+	state->original_decrypt_init = NULL;
+	state->original_decrypt = NULL;
 	state->original_digestsign = NULL;
 	state->original_derive = NULL;
 }
 
 /*
- * Build an ENGINE-scoped EVP_PKEY_METHOD.
- *
- * This follows p11_ecx.c's copy-and-override model, but deliberately does
- * not call EVP_PKEY_meth_add0(): the wrapper is returned only by the ENGINE.
+ * Build an ENGINE-scoped EVP_PKEY_METHOD by preserving the original OpenSSL
+ * method, flags and callbacks and overriding only the callbacks implemented
+ * by PKCS#11.
  */
 static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 {
 	P11_PKEY_METHOD *state;
 #if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
-	EVP_PKEY_METHOD *original;
+	EVP_PKEY_METHOD *original_meth;
 #else
-	const EVP_PKEY_METHOD *original;
+	const EVP_PKEY_METHOD *original_meth;
 #endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
 	int original_type;
 	int original_flags;
@@ -1836,11 +2124,15 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	 * PKEY methods are wrappers around the original OpenSSL method.
 	 * Preserve all callbacks that are not explicitly overridden below.
 	 */
-	original = EVP_PKEY_meth_find(state->type);
-	if (original == NULL)
+#if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
+	original_meth = (EVP_PKEY_METHOD *)EVP_PKEY_meth_find(state->type);
+#else
+	original_meth = EVP_PKEY_meth_find(state->type);
+#endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
+	if (original_meth == NULL)
 		return NULL;
 
-	EVP_PKEY_meth_get0_info(&original_type, &original_flags, original);
+	EVP_PKEY_meth_get0_info(&original_type, &original_flags, original_meth);
 	if (original_type != state->type)
 		return NULL;
 
@@ -1862,12 +2154,31 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	 * Start with the complete OpenSSL implementation so that ctrl,
 	 * keygen, cleanup, peer-key handling, etc. remain unchanged.
 	 */
-	EVP_PKEY_meth_copy(state->method, original);
+	EVP_PKEY_meth_copy(state->method, original_meth);
 
 	switch (state->kind) {
+	case P11_PKEY_RSA:
+		EVP_PKEY_meth_get_sign(original_meth, &state->original_init,
+			&state->original_sign);
+
+		if (state->original_sign == NULL)
+			goto error;
+
+		EVP_PKEY_meth_get_decrypt(original_meth,
+			&state->original_decrypt_init, &state->original_decrypt);
+
+		if (state->original_decrypt == NULL)
+			goto error;
+
+		EVP_PKEY_meth_set_sign(state->method, state->original_init,
+			pkcs11_pkey_rsa_sign);
+		EVP_PKEY_meth_set_decrypt(state->method, state->original_decrypt_init,
+			pkcs11_pkey_rsa_decrypt);
+		break;
+
 #ifndef OPENSSL_NO_EC
 	case P11_PKEY_EC:
-		EVP_PKEY_meth_get_sign(original, &state->original_init,
+		EVP_PKEY_meth_get_sign(original_meth, &state->original_init,
 			&state->original_sign);
 
 		if (state->original_sign == NULL)
@@ -1885,10 +2196,10 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		 * the native OpenSSL EdDSA implementation primarily uses the
 		 * one-shot digestsign callback.
 		 */
-		EVP_PKEY_meth_get_sign(original, &state->original_init,
+		EVP_PKEY_meth_get_sign(original_meth, &state->original_init,
 			&state->original_sign);
 
-		EVP_PKEY_meth_get_digestsign(original, &state->original_digestsign);
+		EVP_PKEY_meth_get_digestsign(original_meth, &state->original_digestsign);
 
 		if (state->original_digestsign == NULL)
 			goto error;
@@ -1900,7 +2211,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		break;
 
 	case P11_PKEY_XDH:
-		EVP_PKEY_meth_get_derive(original, &state->original_init,
+		EVP_PKEY_meth_get_derive(original_meth, &state->original_init,
 			&state->original_derive);
 
 		if (state->original_derive == NULL)
@@ -1922,7 +2233,6 @@ error:
 	pkey_method_reset(state);
 	return NULL;
 }
-#endif
 
 
 #ifndef OPENSSL_NO_EC
@@ -1944,7 +2254,9 @@ static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 }
 #endif /* OPENSSL_NO_EC */
 
-
+/*
+ * Return the ENGINE-supported EVP_PKEY_METHOD for the requested key type.
+ */
 int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 		const int **nids, int nid)
 {
@@ -1961,8 +2273,6 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 #endif /* LIBP11_HAVE_ECX_METHODS */
 		0
 	};
-	static EVP_PKEY_METHOD *pkey_method_rsa = NULL;
-
 	(void)e; /* squash the unused parameter warning */
 	/* all PKCS#11 engines currently share the same pkey_meths */
 
@@ -1978,14 +2288,6 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 	/* get the EVP_PKEY_METHOD */
 	switch (nid) {
 	case EVP_PKEY_RSA:
-		if (!pkey_method_rsa)
-			pkey_method_rsa = pkcs11_pkey_method_rsa();
-		if (!pkey_method_rsa)
-			return 0;
-		*pmeth = pkey_method_rsa;
-		return 1; /* success */
-
-#if !defined(OPENSSL_NO_EC) || defined(LIBP11_HAVE_ECX_METHODS)
 #ifndef OPENSSL_NO_EC
 	case EVP_PKEY_EC:
 #endif /* OPENSSL_NO_EC */
@@ -1997,7 +2299,6 @@ int PKCS11_pkey_meths(ENGINE *e, EVP_PKEY_METHOD **pmeth,
 #endif /* LIBP11_HAVE_ECX_METHODS */
 		*pmeth = pkcs11_pkey_method(nid);
 		return *pmeth != NULL;
-#endif
 	}
 
 	return 0;

@@ -371,7 +371,7 @@ extern PKCS11_KEY *pkcs11_find_key(PKCS11_OBJECT_private *cert);
 /* Return the borrowed PKCS#11 object associated with the EVP_PKEY */
 extern PKCS11_OBJECT_private *pkcs11_get_ex_data_object(const EVP_PKEY *pk);
 
-/* Return the borrowed private PKCS#11 object for EVP_PKEY_METHOD operations */
+/* Return the borrowed private PKCS#11 object for legacy EVP_PKEY_METHOD operations */
 extern PKCS11_OBJECT_private *pkcs11_get_legacy_pkey_object(const EVP_PKEY *pkey);
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
@@ -590,17 +590,6 @@ extern PKCS11_OBJECT_private *pkcs11_get_ex_data_ec(const EC_KEY *ec);
 extern void pkcs11_set_ex_data_ec(EC_KEY *ec, PKCS11_OBJECT_private *key);
 #endif /* OPENSSL_NO_EC */
 
-# if OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L
-/* Set PKCS11_OBJECT_private for an EVP_PKEY */
-extern void pkcs11_set_ex_data_pkey(EVP_PKEY *pkey, PKCS11_OBJECT_private *key);
-
-/* Allocate a global EVP_PKEY ex_data index */
-extern void alloc_pkey_ex_index(void);
-
-/* Free the allocated EVP_PKEY ex_data index. */
-extern void free_pkey_ex_index(void);
-# endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L && OPENSSL_VERSION_NUMBER < 0x40000000L */
-
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /* Free the allocated EVP_PKEY ex_data index. */
 extern void free_evp_pkey_ex_index(void);
@@ -633,10 +622,6 @@ extern void EVP_PKEY_meth_get_sign(EVP_PKEY_METHOD *pmeth,
 			const unsigned char *tbs, size_t tbslen));
 #endif /* OPENSSL_VERSION_NUMBER < 0x100020d0L || defined(LIBRESSL_VERSION_NUMBER) */
 
-#if OPENSSL_VERSION_NUMBER < 0x40000000L
-/* Attempt to sign using the PKCS#11-backed RSA implementation */
-extern EVP_PKEY_METHOD *pkcs11_pkey_method_rsa(void);
-#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
 
 #endif /* _LIBP11_INT_H */
 
