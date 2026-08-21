@@ -1,7 +1,7 @@
 /* libp11, a simple layer on top of PKCS#11 API
  * Copyright (C) 2005 Olaf Kirch <okir@lst.de>
- * Copyright (C) 2016-2025 Michał Trojnara <Michal.Trojnara@stunnel.org>
- * Copyright © 2025 Mobi - Com Polska Sp. z o.o.
+ * Copyright (C) 2016-2026 Michał Trojnara <Michal.Trojnara@stunnel.org>
+ * Copyright © 2026 Mobi - Com Polska Sp. z o.o.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -26,15 +26,15 @@
 /* The maximum length of PIN */
 #define MAX_PIN_LENGTH   256
 
+/* EVP_PKEY ex_data used by provider/native key handling. */
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static int evp_pkey_ex_index = 0;
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
-#if OPENSSL_VERSION_NUMBER < 0x40000000L
-# if OPENSSL_VERSION_NUMBER >= 0x30000000L
-static int pkey_ex_index = 0;
-# endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L*/
-#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
+
+/******************************************************************************/
+/* PKCS#11 key object handling and algorithm-specific key parameters          */
+/******************************************************************************/
 
 #if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
 /* DER OIDs */
@@ -511,6 +511,11 @@ int pkcs11_reload_object(PKCS11_OBJECT_private *obj)
 
 	return 0;
 }
+
+
+/******************************************************************************/
+/* PKCS#11 key generation                                                     */
+/******************************************************************************/
 
 /**
  * Generate RSA key pair directly on token
@@ -1103,6 +1108,11 @@ int pkcs11_falcon_keygen(PKCS11_SLOT_private *slot,
 }
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
+
+/******************************************************************************/
+/* PKCS#11 key storage                                                        */
+/******************************************************************************/
+
 /*
  * Store a private key on the token
  */
@@ -1216,6 +1226,11 @@ static int pkcs11_store_key(PKCS11_SLOT_private *slot, EVP_PKEY *pk,
 
 }
 
+
+/******************************************************************************/
+/* EVP_PKEY construction and PKCS#11 object association                       */
+/******************************************************************************/
+
 /*
  * Get the key type
  */
@@ -1322,26 +1337,6 @@ err:
 PKCS11_OBJECT_private *pkcs11_get_ex_data_object(const EVP_PKEY *pk)
 {
 	return pkcs11_get_ex_data_evp_pkey(pk);
-}
-
-/*
- * Return the borrowed private PKCS#11 object for legacy EVP_PKEY_METHOD
- * operations, or NULL if unavailable or disabled.
- */
-PKCS11_OBJECT_private *pkcs11_get_legacy_pkey_object(const EVP_PKEY *pkey)
-{
-	PKCS11_OBJECT_private *key;
-
-	key = pkcs11_get_ex_data_object(pkey);
-	if (key == NULL)
-		return NULL;
-
-	if (key->object_class != CKO_PRIVATE_KEY ||
-			key->slot == NULL || key->slot->ctx == NULL ||
-			(key->slot->ctx->flags & PKCS11_FLAG_NO_METHODS) != 0)
-		return NULL;
-
-	return key;
 }
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
@@ -1837,6 +1832,13 @@ void pkcs11_destroy_keys(PKCS11_SLOT_private *slot, unsigned int type)
 	keys->num = 0;
 }
 
+/******************************************************************************/
+/* EVP_PKEY ex_data used by provider/native key handling                      */
+/******************************************************************************/
+
+/*
+ * EVP_PKEY ex_data used by provider/native key handling.
+ */
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static void pkcs11_set_ex_data_evp_pkey(EVP_PKEY *pkey,
 		PKCS11_OBJECT_private *obj)
@@ -1910,35 +1912,5 @@ void free_evp_pkey_ex_index(void)
 	}
 }
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
-
-
-#if OPENSSL_VERSION_NUMBER < 0x40000000L
-# if OPENSSL_VERSION_NUMBER >= 0x30000000L
-void pkcs11_set_ex_data_pkey(EVP_PKEY *pkey, PKCS11_OBJECT_private *key)
-{
-	EVP_PKEY_set_ex_data(pkey, pkey_ex_index, key);
-}
-
-void alloc_pkey_ex_index(void)
-{
-	if (pkey_ex_index == 0) {
-		while (pkey_ex_index == 0) /* Workaround for OpenSSL RT3710 */
-			pkey_ex_index = EVP_PKEY_get_ex_new_index(0, "libp11 PKCS11_KEY",
-				NULL, NULL, NULL);
-		if (pkey_ex_index < 0)
-			pkey_ex_index = 0; /* Fallback to app_data */
-	}
-}
-
-void free_pkey_ex_index(void)
-{
-	if (pkey_ex_index > 0) {
-		CRYPTO_free_ex_index(CRYPTO_EX_INDEX_EVP_PKEY, pkey_ex_index);
-		pkey_ex_index = 0;
-	}
-}
-# endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
-
-#endif /* OPENSSL_VERSION_NUMBER < 0x40000000L */
 
 /* vim: set noexpandtab: */
