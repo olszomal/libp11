@@ -1,6 +1,6 @@
 /* libp11, a simple layer on top of PKCS#11 API
  * Copyright (C) 2005 Olaf Kirch <okir@lst.de>
- * Copyright (C) 2015-2025 Michał Trojnara <Michal.Trojnara@stunnel.org>
+ * Copyright (C) 2015-2026 Michał Trojnara <Michal.Trojnara@stunnel.org>
  * Copyright © 2025-2026 Mobi - Com Polska Sp. z o.o.
  *
  *  This library is free software; you can redistribute it and/or
@@ -370,9 +370,6 @@ extern PKCS11_KEY *pkcs11_find_key(PKCS11_OBJECT_private *cert);
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /* Return the borrowed PKCS#11 object associated with the EVP_PKEY */
 extern PKCS11_OBJECT_private *pkcs11_get_ex_data_object(const EVP_PKEY *pk);
-
-/* Return the borrowed private PKCS#11 object for legacy EVP_PKEY_METHOD operations */
-extern PKCS11_OBJECT_private *pkcs11_get_legacy_pkey_object(const EVP_PKEY *pkey);
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /* Get a list of all certificates matching with template associated with this token */
@@ -621,7 +618,6 @@ extern void EVP_PKEY_meth_get_sign(EVP_PKEY_METHOD *pmeth,
 			unsigned char *sig, size_t *siglen,
 			const unsigned char *tbs, size_t tbslen));
 #endif /* OPENSSL_VERSION_NUMBER < 0x100020d0L || defined(LIBRESSL_VERSION_NUMBER) */
-
 
 #endif /* _LIBP11_INT_H */
 
