@@ -242,7 +242,7 @@ generate_ed25519_key_pair () {
 
 	echo "* Generating an Ed25519 key pair on the token ${token_label}"
 	pkcs11-tool --login --pin ${PIN} --module ${MODULE} --id ${obj_id} \
-		--keypairgen --key-type "EC:Ed25519" --usage-sign \
+		--keypairgen --key-type "EC:edwards25519" --usage-sign \
 		--label ${obj_label} --token-label ${token_label}
 	if [[ $? -ne 0 ]]; then
 		exit 1
