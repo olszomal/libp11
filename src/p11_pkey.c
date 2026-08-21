@@ -588,7 +588,6 @@ end:
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /*
  * Execute a PKCS#11 verify operation using the specified mechanism.
- *
  * Returns: CKR_OK on success or PKCS#11 error code on failure
  */
 static CK_RV pkcs11_verify_with_mechanism(PKCS11_OBJECT_private *key,
@@ -725,6 +724,8 @@ end:
 	return rv;
 }
 
+#if !defined(OPENSSL_NO_EC) || \
+	(!defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L)
 /*
  * Execute a PKCS#11 derive operation using the specified mechanism.
  * Returns: CKR_OK on success or PKCS#11/vendor defined error code on failure.
@@ -820,6 +821,8 @@ end:
 	pkcs11_session_pool_release(slot, session);
 	return rv;
 }
+#endif /* #if !defined(OPENSSL_NO_EC) || \
+	(!defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L) */
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 /*
@@ -1786,6 +1789,7 @@ static int pkcs11_pkey_rsa_decrypt(EVP_PKEY_CTX *evp_pkey_ctx,
 
 /* --- EC ENGINE method callbacks ------------------------------------------- */
 
+/* Attempt to sign using the PKCS#11-backed EC implementation */
 static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		unsigned char *sig, size_t *siglen,
 		const unsigned char *tbs, size_t tbslen)
@@ -1833,7 +1837,20 @@ static int pkcs11_try_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 
 static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
 		unsigned char *sig, size_t *siglen,
-		const unsigned char *tbs, size_t tbslen);
+		const unsigned char *tbs, size_t tbslen)
+{
+	P11_PKEY_METHOD *state;
+	int ret;
+
+	state = pkey_method_by_type(EVP_PKEY_EC);
+	if (state == NULL || state->kind != P11_PKEY_EC)
+		return 0;
+
+	ret = pkcs11_try_pkey_ec_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	if (ret < 0 && state->original_sign != NULL)
+		ret = state->original_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
+	return ret;
+}
 #endif /* OPENSSL_NO_EC */
 
 #ifdef LIBP11_HAVE_ECX_METHODS
@@ -1846,7 +1863,7 @@ static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
  *
  * Return -1 only when the key should be handled by the original OpenSSL
  * method.  Once a PKCS#11 private key has been recognized, operational
- * failures return 0 and must not silently fall back to software.
+ * failures return 0 and must not fall back to the original method.
  */
 static int pkcs11_eddsa_pmeth_sign(EVP_PKEY_CTX *ctx, unsigned char *sig,
 	size_t *siglen, const unsigned char *tbs, size_t tbslen)
@@ -1862,7 +1879,7 @@ static int pkcs11_eddsa_pmeth_sign(EVP_PKEY_CTX *ctx, unsigned char *sig,
 	if (pkey == NULL)
 		return 0;
 
-	key = pkcs11_get_legacy_pkey_object(pkey);
+	key = pkcs11_get_ex_data_object(pkey);
 	if (key == NULL)
 		return -1;
 
@@ -1947,7 +1964,7 @@ static int pkcs11_xdh_pmeth_derive(EVP_PKEY_CTX *ctx,
 	if (pkey == NULL)
 		return 0;
 
-	key = pkcs11_get_legacy_pkey_object(pkey);
+	key = pkcs11_get_ex_data_object(pkey);
 	if (key == NULL)
 		return -1;
 
@@ -2082,6 +2099,7 @@ static int pkcs11_ecx_derive(EVP_PKEY_CTX *ctx,
 
 #endif /* LIBP11_HAVE_ECX_METHODS */
 
+
 /* --- ENGINE method construction and registration ------------------------- */
 
 /* Reset cached ENGINE method and original OpenSSL callbacks. */
@@ -2138,8 +2156,8 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 
 #ifdef LIBP11_HAVE_ECX_METHODS
 	/*
-	 * OpenSSL Ed25519/Ed448 use one-shot DigestSign semantics.
-	 * Do not wrap an unexpected method implementation.
+	 * Ed25519/Ed448 methods handle all signature operations and must
+	 * not rely on generic digest-related defaults.
 	 */
 	if (state->kind == P11_PKEY_EDDSA &&
 			!(original_flags & EVP_PKEY_FLAG_SIGCTX_CUSTOM))
@@ -2233,26 +2251,6 @@ error:
 	pkey_method_reset(state);
 	return NULL;
 }
-
-
-#ifndef OPENSSL_NO_EC
-static int pkcs11_pkey_ec_sign(EVP_PKEY_CTX *evp_pkey_ctx,
-		unsigned char *sig, size_t *siglen,
-		const unsigned char *tbs, size_t tbslen)
-{
-	P11_PKEY_METHOD *state;
-	int ret;
-
-	state = pkey_method_by_type(EVP_PKEY_EC);
-	if (state == NULL || state->kind != P11_PKEY_EC)
-		return 0;
-
-	ret = pkcs11_try_pkey_ec_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
-	if (ret < 0 && state->original_sign != NULL)
-		ret = state->original_sign(evp_pkey_ctx, sig, siglen, tbs, tbslen);
-	return ret;
-}
-#endif /* OPENSSL_NO_EC */
 
 /*
  * Return the ENGINE-supported EVP_PKEY_METHOD for the requested key type.
