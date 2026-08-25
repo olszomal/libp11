@@ -572,6 +572,11 @@ extern int PKCS11_generate_key(PKCS11_TOKEN *token,
 	int algorithm, unsigned int bits_or_nid,
 	char *label, unsigned char *id, size_t id_len);
 
+extern int PKCS11_generate_key_ext(PKCS11_TOKEN *token,
+	int algorithm, unsigned int bits_or_nid,
+	char *label, unsigned char *id, size_t id_len,
+	PKCS11_KEY **ret_key);
+
 /* Get the RSA key modulus size (in bytes) */
 extern int PKCS11_get_key_size(PKCS11_KEY *);
 

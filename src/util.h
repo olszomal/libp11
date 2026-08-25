@@ -82,6 +82,8 @@ EVP_PKEY *UTIL_CTX_get_privkey_from_uri(UTIL_CTX *ctx, const char *uri,
 	UI_METHOD *ui_method, void *ui_data);
 
 int UTIL_CTX_keygen(UTIL_CTX *ctx, PKCS11_KGEN_ATTRS *kg_attrs);
+EVP_PKEY *UTIL_CTX_generate_key(UTIL_CTX *ctx, const char *uri, int algorithm,
+	unsigned int param);
 
 #endif /* _UTIL_LIBP11_H */
 

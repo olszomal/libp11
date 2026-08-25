@@ -416,48 +416,48 @@ extern int pkcs11_generate_random(PKCS11_SLOT_private *, unsigned char *r, unsig
 /* Generate and store a private key on the token */
 extern int pkcs11_rsa_keygen(PKCS11_SLOT_private *tpriv,
 	unsigned int bits, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 
 #ifndef OPENSSL_NO_EC
 extern int pkcs11_ec_keygen(PKCS11_SLOT_private *tpriv,
 	const char *curve , const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 #endif /* OPENSSL_NO_EC */
 
 #if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
 extern int pkcs11_eddsa_keygen(PKCS11_SLOT_private *tpriv,
 	int nid, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 
 extern int pkcs11_xdh_keygen(PKCS11_SLOT_private *tpriv,
 	int nid, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 #endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 #if OPENSSL_VERSION_NUMBER >= 0x30500000L
 #ifndef OPENSSL_NO_ML_DSA
 extern int pkcs11_mldsa_keygen(PKCS11_SLOT_private *tpriv,
 	int nid, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 #endif /* OPENSSL_NO_ML_DSA */
 
 #ifndef OPENSSL_NO_ML_KEM
 extern int pkcs11_mlkem_keygen(PKCS11_SLOT_private *tpriv,
 	int nid, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 #endif /* OPENSSL_NO_ML_KEM */
 
 #ifndef OPENSSL_NO_SLH_DSA
 extern int pkcs11_slhdsa_keygen(PKCS11_SLOT_private *tpriv,
 	int nid, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 #endif /* OPENSSL_NO_SLH_DSA */
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30500000L */
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 extern int pkcs11_falcon_keygen(PKCS11_SLOT_private *tpriv,
 	int nid, const char *label, const unsigned char *id,
-	size_t id_len, const PKCS11_params *params);
+	size_t id_len, const PKCS11_params *params, PKCS11_KEY **ret_key);
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 /* Get the RSA key modulus size (in bytes) */

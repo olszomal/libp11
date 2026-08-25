@@ -73,6 +73,9 @@ PROVIDER_FN(keymgmt_export_types);
 PROVIDER_FN(keymgmt_get_params);
 PROVIDER_FN(keymgmt_gettable_params);
 PROVIDER_FN(keymgmt_dup);
+PROVIDER_FN(keymgmt_gen_set_params);
+PROVIDER_FN(keymgmt_gen);
+PROVIDER_FN(keymgmt_gen_cleanup);
 
 PROVIDER_FN(signature_newctx);
 PROVIDER_FN(signature_freectx);
@@ -149,23 +152,6 @@ static const OSSL_DISPATCH provider_functions[] = {
 	{OSSL_FUNC_PROVIDER_GET_PARAMS, (void (*)(void))provider_get_params},
 	{OSSL_FUNC_PROVIDER_QUERY_OPERATION, (void (*)(void))provider_query_operation},
 	{OSSL_FUNC_PROVIDER_GET_REASON_STRINGS, (void (*)(void))provider_get_reason_strings},
-	OSSL_DISPATCH_END
-};
-
-static const OSSL_DISPATCH keymgmt_functions[] = {
-	{OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))keymgmt_new},
-	{OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))keymgmt_load},
-	{OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))keymgmt_free},
-	{OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))keymgmt_has},
-	{OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))keymgmt_match},
-	{OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))keymgmt_query_operation_name},
-	{OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))keymgmt_import},
-	{OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))keymgmt_import_types},
-	{OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))keymgmt_export},
-	{OSSL_FUNC_KEYMGMT_EXPORT_TYPES, (void (*)(void))keymgmt_export_types},
-	{OSSL_FUNC_KEYMGMT_GET_PARAMS, (void (*)(void))keymgmt_get_params},
-	{OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, (void (*)(void))keymgmt_gettable_params},
-	{OSSL_FUNC_KEYMGMT_DUP, (void (*)(void))keymgmt_dup},
 	OSSL_DISPATCH_END
 };
 
@@ -248,60 +234,213 @@ static const OSSL_DISPATCH store_functions[] = {
 	OSSL_DISPATCH_END
 };
 
-/* Keymgmt algorithms: must be real key types (e.g. RSA, EC), not provider names */
-static const OSSL_ALGORITHM p11_keymgmts[] = {
-	{"RSA:rsaEncryption", FIPS_PROPQ, keymgmt_functions, "PKCS#11 RSA keymgm functions"},
+#define KEYMGMT_COMMON_DISPATCH \
+	{OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))keymgmt_new}, \
+	{OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))keymgmt_load}, \
+	{OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))keymgmt_free}, \
+	{OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))keymgmt_has}, \
+	{OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))keymgmt_match}, \
+	{OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, \
+		(void (*)(void))keymgmt_query_operation_name}, \
+	{OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))keymgmt_import}, \
+	{OSSL_FUNC_KEYMGMT_IMPORT_TYPES, \
+		(void (*)(void))keymgmt_import_types}, \
+	{OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))keymgmt_export}, \
+	{OSSL_FUNC_KEYMGMT_EXPORT_TYPES, \
+		(void (*)(void))keymgmt_export_types}, \
+	{OSSL_FUNC_KEYMGMT_GET_PARAMS, \
+		(void (*)(void))keymgmt_get_params}, \
+	{OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, \
+		(void (*)(void))keymgmt_gettable_params}, \
+	{OSSL_FUNC_KEYMGMT_DUP, (void (*)(void))keymgmt_dup}
+
+#define KEYMGMT_GEN_DISPATCH(gen_init, gen_settable) \
+	{OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))(gen_init)}, \
+	{OSSL_FUNC_KEYMGMT_GEN_SET_PARAMS, \
+		(void (*)(void))keymgmt_gen_set_params}, \
+	{OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS, \
+		(void (*)(void))(gen_settable)}, \
+	{OSSL_FUNC_KEYMGMT_GEN, (void (*)(void))keymgmt_gen}, \
+	{OSSL_FUNC_KEYMGMT_GEN_CLEANUP, \
+		(void (*)(void))keymgmt_gen_cleanup}
+
+static OSSL_FUNC_keymgmt_gen_settable_params_fn rsa_keymgmt_gen_settable_params;
+
 #ifndef OPENSSL_NO_EC
-	{"EC:id-ecPublicKey", FIPS_PROPQ, keymgmt_functions, "PKCS#11 EC keymgm functions"},
-	{"ECDH", FIPS_PROPQ, keymgmt_functions, "PKCS#11 key exchange functions"},
+static OSSL_FUNC_keymgmt_gen_settable_params_fn ec_keymgmt_gen_settable_params;
+#endif /* OPENSSL_NO_EC */
+
+static OSSL_FUNC_keymgmt_gen_settable_params_fn common_keymgmt_gen_settable_params;
+
+static void *keymgmt_gen_init_common(void *provctx, int type,
+	int selection, const OSSL_PARAM params[]);
+
+#define DEFINE_KEYMGMT_FUNCTIONS(name, type, gen_settable) \
+	static void *name##_keymgmt_gen_init(void *provctx, int selection, \
+		const OSSL_PARAM params[]) \
+	{ \
+		return keymgmt_gen_init_common(provctx, type, selection, params); \
+	} \
+	static const OSSL_DISPATCH name##_keymgmt_functions[] = { \
+		KEYMGMT_COMMON_DISPATCH, \
+		KEYMGMT_GEN_DISPATCH(name##_keymgmt_gen_init, gen_settable), \
+		OSSL_DISPATCH_END \
+	};
+
+DEFINE_KEYMGMT_FUNCTIONS(rsa, EVP_PKEY_RSA, rsa_keymgmt_gen_settable_params)
+
+#ifndef OPENSSL_NO_EC
+DEFINE_KEYMGMT_FUNCTIONS(ec, EVP_PKEY_EC, ec_keymgmt_gen_settable_params)
+#endif /* OPENSSL_NO_EC */
+
+#ifndef OPENSSL_NO_ECX
+DEFINE_KEYMGMT_FUNCTIONS(ed25519, EVP_PKEY_ED25519,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(ed448, EVP_PKEY_ED448,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(x25519, EVP_PKEY_X25519,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(x448, EVP_PKEY_X448,
+	common_keymgmt_gen_settable_params)
+#endif /* OPENSSL_NO_ECX */
+
+#if OPENSSL_VERSION_NUMBER >= 0x30500000L
+#ifndef OPENSSL_NO_ML_DSA
+DEFINE_KEYMGMT_FUNCTIONS(mldsa44, EVP_PKEY_ML_DSA_44,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(mldsa65, EVP_PKEY_ML_DSA_65,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(mldsa87, EVP_PKEY_ML_DSA_87,
+	common_keymgmt_gen_settable_params)
+#endif /* OPENSSL_NO_ML_DSA */
+
+#ifndef OPENSSL_NO_ML_KEM
+DEFINE_KEYMGMT_FUNCTIONS(mlkem512, EVP_PKEY_ML_KEM_512,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(mlkem768, EVP_PKEY_ML_KEM_768,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(mlkem1024, EVP_PKEY_ML_KEM_1024,
+	common_keymgmt_gen_settable_params)
+#endif /* OPENSSL_NO_ML_KEM */
+
+#ifndef OPENSSL_NO_SLH_DSA
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_sha2_128s, EVP_PKEY_SLH_DSA_SHA2_128S,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_sha2_128f, EVP_PKEY_SLH_DSA_SHA2_128F,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_sha2_192s, EVP_PKEY_SLH_DSA_SHA2_192S,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_sha2_192f, EVP_PKEY_SLH_DSA_SHA2_192F,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_sha2_256s, EVP_PKEY_SLH_DSA_SHA2_256S,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_sha2_256f, EVP_PKEY_SLH_DSA_SHA2_256F,
+	common_keymgmt_gen_settable_params)
+
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_shake_128s, EVP_PKEY_SLH_DSA_SHAKE_128S,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_shake_128f, EVP_PKEY_SLH_DSA_SHAKE_128F,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_shake_192s, EVP_PKEY_SLH_DSA_SHAKE_192S,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_shake_192f, EVP_PKEY_SLH_DSA_SHAKE_192F,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_shake_256s, EVP_PKEY_SLH_DSA_SHAKE_256S,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(slhdsa_shake_256f, EVP_PKEY_SLH_DSA_SHAKE_256F,
+	common_keymgmt_gen_settable_params)
+#endif /* OPENSSL_NO_SLH_DSA */
+#endif /* OPENSSL_VERSION_NUMBER >= 0x30500000L */
+
+DEFINE_KEYMGMT_FUNCTIONS(falcon512, EVP_PKEY_FALCON512,
+	common_keymgmt_gen_settable_params)
+DEFINE_KEYMGMT_FUNCTIONS(falcon1024, EVP_PKEY_FALCON1024,
+	common_keymgmt_gen_settable_params)
+
+
+/*
+ * Keymgmt algorithms: must be real key types (e.g. RSA, EC), not provider names.
+ */
+static const OSSL_ALGORITHM p11_keymgmts[] = {
+	{"RSA:rsaEncryption", FIPS_PROPQ, rsa_keymgmt_functions,
+		"PKCS#11 RSA keymgm functions"},
+#ifndef OPENSSL_NO_EC
+	{"EC:id-ecPublicKey", FIPS_PROPQ, ec_keymgmt_functions,
+		"PKCS#11 EC keymgm functions"},
+	{"ECDH", FIPS_PROPQ, ec_keymgmt_functions,
+		"PKCS#11 key exchange functions"},
 #endif /* OPENSSL_NO_EC */
 #ifndef OPENSSL_NO_ECX
-	{"ED25519", FIPS_PROPQ, keymgmt_functions, "PKCS#11 Ed25519 keymgm functions"},
-	{"ED448", FIPS_PROPQ, keymgmt_functions, "PKCS#11 Ed448 keymgm functions"},
-	{"X25519", FIPS_PROPQ, keymgmt_functions, "PKCS#11 X25519 keymgm functions"},
-	{"X448", FIPS_PROPQ, keymgmt_functions, "PKCS#11 X448 keymgm functions"},
+	{"ED25519", FIPS_PROPQ, ed25519_keymgmt_functions,
+		"PKCS#11 Ed25519 keymgm functions"},
+	{"ED448", FIPS_PROPQ, ed448_keymgmt_functions,
+		"PKCS#11 Ed448 keymgm functions"},
+	{"X25519", FIPS_PROPQ, x25519_keymgmt_functions,
+		"PKCS#11 X25519 keymgm functions"},
+	{"X448", FIPS_PROPQ, x448_keymgmt_functions,
+		"PKCS#11 X448 keymgm functions"},
 #endif /* OPENSSL_NO_ECX */
 #if OPENSSL_VERSION_NUMBER >= 0x30500000L
 #ifndef OPENSSL_NO_ML_DSA
-	{"ML-DSA-44", FIPS_PROPQ, keymgmt_functions, "PKCS#11 ML-DSA-44 keymgmt functions"},
-	{"ML-DSA-65", FIPS_PROPQ, keymgmt_functions, "PKCS#11 ML-DSA-65 keymgmt functions"},
-	{"ML-DSA-87", FIPS_PROPQ, keymgmt_functions, "PKCS#11 ML-DSA-87 keymgmt functions"},
+	{"ML-DSA-44", FIPS_PROPQ, mldsa44_keymgmt_functions,
+		"PKCS#11 ML-DSA-44 keymgmt functions"},
+	{"ML-DSA-65", FIPS_PROPQ, mldsa65_keymgmt_functions,
+		"PKCS#11 ML-DSA-65 keymgmt functions"},
+	{"ML-DSA-87", FIPS_PROPQ, mldsa87_keymgmt_functions,
+		"PKCS#11 ML-DSA-87 keymgmt functions"},
 #endif /* OPENSSL_NO_ML_DSA */
 #ifndef OPENSSL_NO_ML_KEM
-	{"ML-KEM-512", FIPS_PROPQ, keymgmt_functions, "PKCS#11 ML-KEM-512 keymgmt functions"},
-	{"ML-KEM-768", FIPS_PROPQ, keymgmt_functions, "PKCS#11 ML-KEM-768 keymgmt functions"},
-	{"ML-KEM-1024", FIPS_PROPQ, keymgmt_functions, "PKCS#11 ML-KEM-1024 keymgmt functions"},
+	{"ML-KEM-512", FIPS_PROPQ, mlkem512_keymgmt_functions,
+		"PKCS#11 ML-KEM-512 keymgmt functions"},
+	{"ML-KEM-768", FIPS_PROPQ, mlkem768_keymgmt_functions,
+		"PKCS#11 ML-KEM-768 keymgmt functions"},
+	{"ML-KEM-1024", FIPS_PROPQ, mlkem1024_keymgmt_functions,
+		"PKCS#11 ML-KEM-1024 keymgmt functions"},
 #endif /* OPENSSL_NO_ML_KEM */
 #ifndef OPENSSL_NO_SLH_DSA
-	{"SLH-DSA-SHA2-128s", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHA2-128s", FIPS_PROPQ,
+		slhdsa_sha2_128s_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHA2-128s keymgmt functions"},
-	{"SLH-DSA-SHA2-128f", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHA2-128f", FIPS_PROPQ,
+		slhdsa_sha2_128f_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHA2-128f keymgmt functions"},
-	{"SLH-DSA-SHA2-192s", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHA2-192s", FIPS_PROPQ,
+		slhdsa_sha2_192s_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHA2-192s keymgmt functions"},
-	{"SLH-DSA-SHA2-192f", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHA2-192f", FIPS_PROPQ,
+		slhdsa_sha2_192f_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHA2-192f keymgmt functions"},
-	{"SLH-DSA-SHA2-256s", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHA2-256s", FIPS_PROPQ,
+		slhdsa_sha2_256s_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHA2-256s keymgmt functions"},
-	{"SLH-DSA-SHA2-256f", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHA2-256f", FIPS_PROPQ,
+		slhdsa_sha2_256f_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHA2-256f keymgmt functions"},
-	{"SLH-DSA-SHAKE-128s", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHAKE-128s", FIPS_PROPQ,
+		slhdsa_shake_128s_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHAKE-128s keymgmt functions"},
-	{"SLH-DSA-SHAKE-128f", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHAKE-128f", FIPS_PROPQ,
+		slhdsa_shake_128f_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHAKE-128f keymgmt functions"},
-	{"SLH-DSA-SHAKE-192s", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHAKE-192s", FIPS_PROPQ,
+		slhdsa_shake_192s_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHAKE-192s keymgmt functions"},
-	{"SLH-DSA-SHAKE-192f", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHAKE-192f", FIPS_PROPQ,
+		slhdsa_shake_192f_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHAKE-192f keymgmt functions"},
-	{"SLH-DSA-SHAKE-256s", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHAKE-256s", FIPS_PROPQ,
+		slhdsa_shake_256s_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHAKE-256s keymgmt functions"},
-	{"SLH-DSA-SHAKE-256f", FIPS_PROPQ, keymgmt_functions,
+	{"SLH-DSA-SHAKE-256f", FIPS_PROPQ,
+		slhdsa_shake_256f_keymgmt_functions,
 		"PKCS#11 SLH-DSA-SHAKE-256f keymgmt functions"},
 #endif /* OPENSSL_NO_SLH_DSA */
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30500000L */
-	{"FALCON-512:FN-DSA-512:falcon512", FIPS_PROPQ, keymgmt_functions,
+	{"FALCON-512:FN-DSA-512:falcon512", FIPS_PROPQ,
+		falcon512_keymgmt_functions,
 		"PKCS#11 Falcon-512 keymgmt"},
-	{"FALCON-1024:FN-DSA-1024:falcon1024", FIPS_PROPQ, keymgmt_functions,
+	{"FALCON-1024:FN-DSA-1024:falcon1024", FIPS_PROPQ,
+		falcon1024_keymgmt_functions,
 		"PKCS#11 Falcon-1024 keymgmt"},
 	{NULL, NULL, NULL, NULL}
 };
@@ -806,6 +945,83 @@ static void *keymgmt_dup(const void *provkey, int selection)
 		return NULL;
 
 	return keydata;
+}
+
+/*
+ * KEYMGMT generation initialization needs to know the concrete key type.
+ * The remaining KEYMGMT callbacks are shared by all supported algorithms.
+ */
+static void *keymgmt_gen_init_common(void *provctx, int type,
+	int selection, const OSSL_PARAM params[])
+{
+	if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0)
+		return NULL;
+
+	return p11_keygen_ctx_new(provctx, type, params);
+}
+
+/* Set additional parameters from params in the key object generation context genctx. */
+int keymgmt_gen_set_params(void *genctx, const OSSL_PARAM params[])
+{
+	return p11_keygen_ctx_set_params(genctx, params);
+}
+
+static const OSSL_PARAM *rsa_keymgmt_gen_settable_params(
+	void *genctx, void *provctx)
+{
+	static const OSSL_PARAM keymgmt_gen_settable_rsa[] = {
+		OSSL_PARAM_utf8_string("pkcs11_uri", NULL, 0),
+		OSSL_PARAM_uint(OSSL_PKEY_PARAM_RSA_BITS, NULL),
+		OSSL_PARAM_END
+	};
+	(void)genctx;
+	(void)provctx;
+
+	return keymgmt_gen_settable_rsa;
+}
+
+#ifndef OPENSSL_NO_EC
+static const OSSL_PARAM *ec_keymgmt_gen_settable_params(
+	void *genctx, void *provctx)
+{
+	static const OSSL_PARAM keymgmt_gen_settable_ec[] = {
+		OSSL_PARAM_utf8_string("pkcs11_uri", NULL, 0),
+		OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0),
+		OSSL_PARAM_END
+	};
+
+	(void)genctx;
+	(void)provctx;
+
+	return keymgmt_gen_settable_ec;
+}
+#endif /* OPENSSL_NO_EC */
+
+static const OSSL_PARAM *common_keymgmt_gen_settable_params(
+	void *genctx, void *provctx)
+{
+	static const OSSL_PARAM keymgmt_gen_settable_common[] = {
+		OSSL_PARAM_utf8_string("pkcs11_uri", NULL, 0),
+		OSSL_PARAM_END
+	};
+	(void)genctx;
+	(void)provctx;
+
+	return keymgmt_gen_settable_common;
+}
+
+/* Perform the key object generation itself, and return the result. */
+void *keymgmt_gen(void *genctx, OSSL_CALLBACK *cb, void *cbarg)
+{
+	(void)cb;
+	(void)cbarg;
+	return p11_keygen_ctx_generate(genctx);
+}
+
+/* Clean up and free the key object generation context. */
+void keymgmt_gen_cleanup(void *genctx)
+{
+	p11_keygen_ctx_free(genctx);
 }
 
 /******************************************************************************/

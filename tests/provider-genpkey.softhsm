@@ -1,0 +1,165 @@
+#!/bin/bash
+
+# Copyright © 2026 Mobi - Com Polska Sp. z o.o.
+# Author: Małgorzata Olszówka <Malgorzata.Olszowka@stunnel.org>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+outdir="output.$$"
+
+# Load common test functions
+. "${srcdir}/common.sh"
+
+if [[ "${OPENSSL_VERSION}" =~ ^[012].* ]]; then
+	echo "Skipping provider tests with OpenSSL ${OPENSSL_VERSION}"
+	rm -rf "$outdir"
+	exit 77
+fi
+
+# Initialize SoftHSM DB
+init_db
+
+# Create token
+init_card "libp11-0"
+
+# Ensure the use of the locally built provider
+unset OPENSSL_ENGINES
+export OPENSSL_MODULES="../src/.libs/"
+export PKCS11_MODULE_PATH=${MODULE}
+
+echo "OPENSSL_MODULES=${OPENSSL_MODULES}"
+echo "PKCS11_MODULE_PATH=${PKCS11_MODULE_PATH}"
+
+# Load OpenSSL settings
+. ${srcdir}/openssl-settings.sh
+
+# Restore OpenSSL settings
+trap cleanup EXIT
+
+GENPKEY_ID=1
+
+genpkey()
+{
+	algorithm="$1"
+	label="$2"
+	shift 2
+
+	id=$(printf '%%01%%02%%03%%%02X' "${GENPKEY_ID}")
+	GENPKEY_ID=$((GENPKEY_ID + 1))
+
+	echo "Generating ${algorithm} key"
+
+	# TODO: use -noout for non-exportable token keys to avoid a false genpkey failure
+	# Load default first to avoid SoftHSM recursively selecting pkcs11prov
+	# for its internal Ed25519/Ed448 key generation on OpenSSL 3.x.
+	${OPENSSL} genpkey \
+		-provider default -provider pkcs11prov \
+		-propquery "?provider=pkcs11prov" \
+		-algorithm "${algorithm}" \
+		-pkeyopt "pkcs11_uri:pkcs11:token=libp11-0;object=${label};id=${id};pin-value=${PIN}" \
+		"$@" || true
+
+	# This is a workaround until genpkey can skip private-key output explicitly
+	if ! list_objects | grep "label:" | grep -qF "${label}"; then
+		echo "${algorithm} key generation failed."
+		return 1
+	fi
+
+	echo "${algorithm} key generation succeeded."
+	echo
+	return 0
+}
+
+if has_mechanism RSA-PKCS-KEY-PAIR-GEN; then
+	genpkey RSA rsa-genpkey -pkeyopt rsa_keygen_bits:2048 || exit 1
+else
+	echo "Skipping RSA: mechanism not supported."
+	echo
+fi
+
+if has_mechanism ECDSA-KEY-PAIR-GEN; then
+	genpkey EC ec-genpkey -pkeyopt ec_paramgen_curve:P-256 || exit 1
+else
+	echo "Skipping EC: mechanism not supported."
+	echo
+fi
+
+if has_mechanism EC-EDWARDS-KEY-PAIR-GEN; then
+	genpkey ED25519 ed25519-genpkey || exit 1
+	genpkey ED448 ed448-genpkey || exit 1
+else
+	echo "Skipping ED25519/ED448: mechanism not supported."
+	echo
+fi
+
+if has_mechanism EC-MONTGOMERY-KEY-PAIR-GEN || has_mechanism mechtype-0x1056; then
+	genpkey X25519 x25519-genpkey || exit 1
+	genpkey X448 x448-genpkey || exit 1
+else
+	echo "Skipping X25519/X448: mechanism not supported."
+	echo
+fi
+
+if has_mechanism ML-DSA-KEY-PAIR-GEN ||	has_mechanism mechtype-0x1C; then
+	genpkey ML-DSA-44 mldsa44-genpkey || exit 1
+	genpkey ML-DSA-65 mldsa65-genpkey || exit 1
+	genpkey ML-DSA-87 mldsa87-genpkey || exit 1
+else
+	echo "Skipping ML-DSA: mechanism not supported."
+	echo
+fi
+
+if has_mechanism ML-KEM-KEY-PAIR-GEN ||	has_mechanism mechtype-0xF; then
+	genpkey ML-KEM-512 mlkem512-genpkey || exit 1
+	genpkey ML-KEM-768 mlkem768-genpkey || exit 1
+	genpkey ML-KEM-1024 mlkem1024-genpkey || exit 1
+else
+	echo "Skipping ML-KEM: mechanism not supported."
+	echo
+fi
+
+if has_mechanism SLH-DSA-KEY-PAIR-GEN || has_mechanism mechtype-0x2D; then
+	genpkey SLH-DSA-SHA2-128s slhdsa-sha2-128s-genpkey || exit 1
+	genpkey SLH-DSA-SHA2-128f slhdsa-sha2-128f-genpkey || exit 1
+	genpkey SLH-DSA-SHA2-192s slhdsa-sha2-192s-genpkey || exit 1
+	genpkey SLH-DSA-SHA2-192f slhdsa-sha2-192f-genpkey || exit 1
+	genpkey SLH-DSA-SHA2-256s slhdsa-sha2-256s-genpkey || exit 1
+	genpkey SLH-DSA-SHA2-256f slhdsa-sha2-256f-genpkey || exit 1
+
+	genpkey SLH-DSA-SHAKE-128s slhdsa-shake-128s-genpkey || exit 1
+	genpkey SLH-DSA-SHAKE-128f slhdsa-shake-128f-genpkey || exit 1
+	genpkey SLH-DSA-SHAKE-192s slhdsa-shake-192s-genpkey || exit 1
+	genpkey SLH-DSA-SHAKE-192f slhdsa-shake-192f-genpkey || exit 1
+	genpkey SLH-DSA-SHAKE-256s slhdsa-shake-256s-genpkey || exit 1
+	genpkey SLH-DSA-SHAKE-256f slhdsa-shake-256f-genpkey || exit 1
+else
+	echo "Skipping SLH-DSA: mechanism not supported."
+	echo
+fi
+
+if  has_mechanism PQC-FALCON || has_mechanism mechtype-0x80010025; then
+	genpkey FALCON-512 falcon512-genpkey || exit 1
+	genpkey FALCON-1024 falcon1024-genpkey || exit 1
+else
+	echo "Skipping FALCON: mechanism not supported."
+	echo
+fi
+
+list_objects
+
+rm -rf "$outdir"
+
+exit 0
+
+# vim: set noexpandtab:

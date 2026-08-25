@@ -1616,4 +1616,78 @@ int UTIL_CTX_keygen(UTIL_CTX *ctx, PKCS11_KGEN_ATTRS *kg_attrs)
 	return 1;
 }
 
+/*
+ * Generate a key pair on the token uniquely selected by the PKCS#11 URI.
+ * The URI also specifies the generated key label and ID.
+ * Returns an EVP_PKEY for the generated private key, or NULL on error.
+ */
+EVP_PKEY *UTIL_CTX_generate_key(UTIL_CTX *ctx, const char *uri, int algorithm,
+	unsigned int param)
+{
+	PARSED parsed = {0};
+	PKCS11_SLOT *slot = NULL;
+	PKCS11_KEY *pkey = NULL;
+	EVP_PKEY *key = NULL;
+	size_t i;
+	unsigned int count = 0;
+	int rv;
+
+	if (ctx == NULL || uri == NULL || strncasecmp(uri, "pkcs11:", 7) != 0)
+		return NULL;
+
+	pthread_mutex_lock(&ctx->lock);
+
+	if (util_ctx_init_libp11(ctx))
+		goto end;
+
+	if (!util_ctx_parse_uri(ctx, &parsed, "key", uri))
+		goto end;
+
+	/*
+	 * Key generation requires exactly one initialized token.
+	 * This avoids generating a key on an arbitrary matching token.
+	 */
+	for (i = 0; i < parsed.matched_count; i++) {
+		PKCS11_SLOT *candidate = parsed.matched_slots[i];
+
+		if (candidate == NULL || candidate->token == NULL ||
+				!candidate->token->initialized)
+			continue;
+
+		slot = candidate;
+		count++;
+	}
+
+	if (count != 1 || slot == NULL) {
+		UTIL_CTX_log(ctx, LOG_ERR,
+			"PKCS#11 URI must match exactly one initialized token\n");
+		goto end;
+	}
+
+	if (!util_ctx_login(ctx, slot, slot->token, ctx->ui_method, ctx->ui_data))
+		goto end;
+
+	rv = PKCS11_generate_key_ext(slot->token, algorithm, param,
+		parsed.obj_label, (unsigned char *)parsed.obj_id,
+		parsed.obj_id_len, &pkey);
+	if (rv < 0 || pkey == NULL) {
+		UTIL_CTX_log(ctx, LOG_ERR,
+			"Failed to generate a key pair on the token. Error code: %d\n",
+			rv);
+		goto end;
+	}
+
+	key = PKCS11_get_private_key(pkey);
+	if (key == NULL)
+		UTIL_CTX_log(ctx, LOG_ERR,
+			"Failed to create EVP_PKEY for the generated private key\n");
+
+end:
+	pthread_mutex_unlock(&ctx->lock);
+	OPENSSL_free(parsed.obj_label);
+	OPENSSL_free(parsed.matched_slots);
+	OPENSSL_free(parsed.obj_id);
+	return key;
+}
+
 /* vim: set noexpandtab: */

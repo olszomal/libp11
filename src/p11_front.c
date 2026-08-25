@@ -440,7 +440,8 @@ int PKCS11_set_ui_method(PKCS11_CTX *pctx, UI_METHOD *ui_method, void *ui_user_d
 
 /* External interface to the deprecated features */
 
-int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
+static int pkcs11_keygen_internal(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg,
+	PKCS11_KEY **ret_key)
 {
 	PKCS11_SLOT_private *slot;
 
@@ -454,21 +455,25 @@ int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
 	switch(kg->type) {
 	case EVP_PKEY_RSA:
 		return pkcs11_rsa_keygen(slot, kg->kgen.rsa->bits,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #ifndef OPENSSL_NO_EC
 	case EVP_PKEY_EC:
 		return pkcs11_ec_keygen(slot, kg->kgen.ec->curve,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #endif /* OPENSSL_NO_EC */
 #if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
 	case EVP_PKEY_ED25519:
 	case EVP_PKEY_ED448:
 		return pkcs11_eddsa_keygen(slot, kg->kgen.nid->nid,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 	case EVP_PKEY_X25519:
 	case EVP_PKEY_X448:
 		return pkcs11_xdh_keygen(slot, kg->kgen.eddsa->nid,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 #if OPENSSL_VERSION_NUMBER >= 0x30500000L
@@ -477,7 +482,8 @@ int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
 	case EVP_PKEY_ML_DSA_65:
 	case EVP_PKEY_ML_DSA_87:
 		return pkcs11_mldsa_keygen(slot, kg->kgen.nid->nid,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #endif /* OPENSSL_NO_ML_DSA */
 
 #ifndef OPENSSL_NO_ML_KEM
@@ -485,7 +491,8 @@ int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
 	case EVP_PKEY_ML_KEM_768:
 	case EVP_PKEY_ML_KEM_1024:
 		return pkcs11_mlkem_keygen(slot, kg->kgen.nid->nid,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #endif /* OPENSSL_NO_ML_KEM */
 
 #ifndef OPENSSL_NO_SLH_DSA
@@ -502,7 +509,8 @@ int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
 	case EVP_PKEY_SLH_DSA_SHAKE_256S:
 	case EVP_PKEY_SLH_DSA_SHAKE_256F:
 		return pkcs11_slhdsa_keygen(slot, kg->kgen.nid->nid,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #endif /* OPENSSL_NO_SLH_DSA */
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30500000L */
 
@@ -510,7 +518,8 @@ int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
 	case EVP_PKEY_FALCON512:
 	case EVP_PKEY_FALCON1024:
 		return pkcs11_falcon_keygen(slot, kg->kgen.nid->nid,
-				kg->key_label, kg->key_id, kg->id_len, kg->key_params);
+				kg->key_label, kg->key_id, kg->id_len,
+				kg->key_params, ret_key);
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 
 	default:
@@ -518,9 +527,10 @@ int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
 	}
 }
 
-int PKCS11_generate_key(PKCS11_TOKEN *token, int algorithm,
+int PKCS11_generate_key_ext(PKCS11_TOKEN *token, int algorithm,
 		unsigned int param, /* bits for RSA, nid for EC, unused for EdDSA */
-		char *label, unsigned char *id, size_t id_len)
+		char *label, unsigned char *id, size_t id_len,
+		PKCS11_KEY **ret_key)
 {
 	PKCS11_params key_params = { .extractable = 0, .sensitive = 1 };
 #ifndef OPENSSL_NO_EC
@@ -531,6 +541,9 @@ int PKCS11_generate_key(PKCS11_TOKEN *token, int algorithm,
 #endif /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
 	PKCS11_RSA_KGEN rsa_kgen;
 	PKCS11_KGEN_ATTRS kgen_attrs = { 0 };
+
+	if (ret_key != NULL)
+		*ret_key = NULL;
 
 	switch (algorithm) {
 #ifndef OPENSSL_NO_EC
@@ -872,7 +885,20 @@ int PKCS11_generate_key(PKCS11_TOKEN *token, int algorithm,
 		};
 	}
 
-	return PKCS11_keygen(token, &kgen_attrs);
+	return pkcs11_keygen_internal(token, &kgen_attrs, ret_key);
+}
+
+int PKCS11_generate_key(PKCS11_TOKEN *token, int algorithm,
+	unsigned int param, char *label,
+	unsigned char *id, size_t id_len)
+{
+	return PKCS11_generate_key_ext(token, algorithm, param,
+		label, id, id_len, NULL);
+}
+
+int PKCS11_keygen(PKCS11_TOKEN *token, PKCS11_KGEN_ATTRS *kg)
+{
+	return pkcs11_keygen_internal(token, kg, NULL);
 }
 
 int PKCS11_get_key_size(PKCS11_KEY *pkey)
