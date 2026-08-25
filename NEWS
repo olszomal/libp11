@@ -5,6 +5,7 @@ New in 0.4.21; unreleased
   As a compatibility regression, registering PKCS11_pkey_meths() directly as
   an ENGINE callback now leaks methods; use the bundled engine, which caches
   methods per ENGINE.
+* Added PKCS#11 provider support for `openssl genpkey` (Małgorzata Olszówka)
 
 New in 0.4.20; 2026-08-08; Michał Trojnara
 * Added PKCS#11 3.2 interface discovery and updated the bundled header

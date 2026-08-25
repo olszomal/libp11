@@ -90,7 +90,8 @@ dist_check_SCRIPTS = \
 	provider-fork-change-slot.softhsm \
 	provider-case-insensitive.softhsm \
 	provider-pkcs11-uri-without-token.softhsm \
-	provider-search-all-matching-tokens.softhsm
+	provider-search-all-matching-tokens.softhsm \
+	provider-genpkey.softhsm
 dist_check_DATA = \
 	rsa-cert.der rsa-privkey.der rsa-pubkey.der \
 	ec-cert.der ec-privkey.der ec-pubkey.der \

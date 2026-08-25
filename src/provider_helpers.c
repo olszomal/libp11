@@ -182,6 +182,13 @@ struct p11_keydata_st {
 	P11_PUBDATA pubdata;
 };
 
+struct p11_keygen_ctx {
+	PROVIDER_CTX *prov_ctx;
+	int type;
+	char *uri;
+	unsigned int param; /* bits for RSA, nid for EC, unused for others */
+};
+
 struct p11_store_ctx_st {
 	PROVIDER_CTX *prov_ctx;
 	char *uri;
@@ -967,6 +974,125 @@ int keydata_export_pub(P11_KEYDATA *keydata, OSSL_CALLBACK *param_cb, void *cbar
 		return export_ec_pub(keydata, param_cb, cbarg);
 #endif /* OPENSSL_NO_EC */
 	return export_raw_pub(keydata, param_cb, cbarg);
+}
+
+/******************************************************************************/
+/* KEY GENERATION helper functions                                            */
+/******************************************************************************/
+
+P11_KEYGEN_CTX *p11_keygen_ctx_new(PROVIDER_CTX *prov_ctx, int type,
+	const OSSL_PARAM params[])
+{
+	P11_KEYGEN_CTX *gen_ctx;
+
+	if (prov_ctx == NULL)
+		return NULL;
+
+	if (!PROVIDER_CTX_is_initialized(prov_ctx)) {
+		if (!PROVIDER_CTX_set_parameters(prov_ctx))
+			return NULL;
+		PROVIDER_CTX_initialize(prov_ctx);
+	}
+
+	gen_ctx = OPENSSL_zalloc(sizeof(P11_KEYGEN_CTX));
+	if (gen_ctx == NULL)
+		return NULL;
+
+	gen_ctx->prov_ctx = prov_ctx;
+	gen_ctx->type = type;
+	if (type == EVP_PKEY_RSA)
+		gen_ctx->param = 2048;
+
+	if (!p11_keygen_ctx_set_params(gen_ctx, params)) {
+		p11_keygen_ctx_free(gen_ctx);
+		return NULL;
+	}
+	return gen_ctx;
+}
+
+void p11_keygen_ctx_free(P11_KEYGEN_CTX *gen_ctx)
+{
+	if (gen_ctx == NULL)
+		return;
+
+	OPENSSL_free(gen_ctx->uri);
+	OPENSSL_free(gen_ctx);
+}
+
+int p11_keygen_ctx_set_params(P11_KEYGEN_CTX *gen_ctx, const OSSL_PARAM params[])
+{
+	const OSSL_PARAM *p;
+
+	if (gen_ctx == NULL)
+		return 0;
+
+	if (params == NULL)
+		return 1;
+
+	p = OSSL_PARAM_locate_const(params, "pkcs11_uri");
+	if (p != NULL) {
+		char *uri = NULL;
+
+		if (!OSSL_PARAM_get_utf8_string(p, &uri, 0))
+			return 0;
+
+		OPENSSL_free(gen_ctx->uri);
+		gen_ctx->uri = uri;
+	}
+
+	switch (gen_ctx->type) {
+	case EVP_PKEY_RSA:
+		p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_BITS);
+		if (p != NULL && !OSSL_PARAM_get_uint(p, &gen_ctx->param))
+			return 0;
+		break;
+
+#ifndef OPENSSL_NO_EC
+	case EVP_PKEY_EC:
+		p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_GROUP_NAME);
+		if (p != NULL) {
+			const char *group;
+			int nid;
+
+			if (!OSSL_PARAM_get_utf8_string_ptr(p, &group))
+				return 0;
+
+			nid = OBJ_txt2nid(group);
+			if (nid == NID_undef)
+				nid = EC_curve_nist2nid(group);
+			if (nid == NID_undef)
+				return 0;
+
+			gen_ctx->param = (unsigned int)nid;
+		}
+		break;
+#endif /* OPENSSL_NO_EC */
+
+	default:
+		break;
+	}
+
+	return 1;
+}
+
+P11_KEYDATA *p11_keygen_ctx_generate(P11_KEYGEN_CTX *gen_ctx)
+{
+	EVP_PKEY *key;
+	P11_KEYDATA *keydata;
+
+	if (gen_ctx == NULL || gen_ctx->prov_ctx == NULL ||
+			gen_ctx->uri == NULL)
+		return NULL;
+
+	key = UTIL_CTX_generate_key(gen_ctx->prov_ctx->util_ctx,
+		gen_ctx->uri, gen_ctx->type, gen_ctx->param);
+	if (key == NULL)
+		return NULL;
+
+	keydata = p11_keydata_from_evp_pkey(gen_ctx->prov_ctx, key, 1);
+
+	EVP_PKEY_free(key);
+	return keydata;
 }
 
 /******************************************************************************/

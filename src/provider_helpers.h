@@ -49,6 +49,7 @@
 /* opaque, defined in provider_helpers.c */
 typedef struct provider_ctx PROVIDER_CTX;
 typedef struct p11_keydata_st P11_KEYDATA;
+typedef struct p11_keygen_ctx P11_KEYGEN_CTX;
 typedef struct p11_signature_ctx P11_SIGNATURE_CTX;
 typedef struct p11_asym_cipher_ctx P11_ASYM_CIPHER_CTX;
 typedef struct p11_keyexch_ctx P11_KEYEXCH_CTX;
@@ -97,6 +98,15 @@ int p11_keydata_set_params(P11_KEYDATA *keydata, const OSSL_PARAM *params);
 int p11_public_equal(const P11_KEYDATA *k1, const P11_KEYDATA *k2);
 int pad_mode_from_param(const OSSL_PARAM *p, int *pad_mode);
 int keydata_export_pub(P11_KEYDATA *keydata, OSSL_CALLBACK *param_cb, void *cbarg);
+
+/******************************************************************************/
+/* KEY GENERATION helper functions                                            */
+/******************************************************************************/
+P11_KEYGEN_CTX *p11_keygen_ctx_new(PROVIDER_CTX *prov_ctx, int type,
+	const OSSL_PARAM params[]);
+void p11_keygen_ctx_free(P11_KEYGEN_CTX *genctx);
+int p11_keygen_ctx_set_params(P11_KEYGEN_CTX *genctx, const OSSL_PARAM params[]);
+P11_KEYDATA *p11_keygen_ctx_generate(P11_KEYGEN_CTX *genctx);
 
 /******************************************************************************/
 /* SIGNATURE helper functions                                                 */
