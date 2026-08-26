@@ -34,6 +34,11 @@
 #define RSA_PSS_SALTLEN_AUTO_DIGEST_MAX -4
 #endif
 
+#if !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L
+#define X25519_PUB_LEN  32
+#define X448_PUB_LEN    56
+#endif /* !defined(OPENSSL_NO_ECX) && OPENSSL_VERSION_NUMBER >= 0x30000000L */
+
 
 /******************************************************************************/
 /* Legacy ENGINE EVP_PKEY_METHOD support                                      */
@@ -51,8 +56,8 @@
 #ifdef LIBP11_HAVE_ECX_METHODS
 #define ED25519_SIG_LEN 64
 #define ED448_SIG_LEN   114
-#define X25519_KEY_LEN  32
-#define X448_KEY_LEN    56
+#define X25519_KEY_LEN  X25519_PUB_LEN
+#define X448_KEY_LEN    X448_PUB_LEN
 #endif /* LIBP11_HAVE_ECX_METHODS */
 
 #if OPENSSL_VERSION_NUMBER < 0x40000000L
@@ -1530,12 +1535,13 @@ extern int pkcs11_evp_pkey_xdh_derive(PKCS11_OBJECT_private *key,
 {
 	CK_MECHANISM mechanism;
 	CK_ECDH1_DERIVE_PARAMS derive_params;
+	static const unsigned char zero[X448_PUB_LEN] = {0};
 	CK_RV rv;
 
-	if (key == NULL || peer_pub == NULL || peer_pub_len == 0 || secretlen == NULL)
+	if (key == NULL || peer_pub == NULL || secretlen == NULL)
 		return -1;
 
-	if (peer_pub_len > (size_t)(CK_ULONG)-1)
+	if (peer_pub_len != X25519_PUB_LEN && peer_pub_len != X448_PUB_LEN)
 		return -1;
 
 	memset(&derive_params, 0, sizeof(derive_params));
@@ -1554,6 +1560,15 @@ extern int pkcs11_evp_pkey_xdh_derive(PKCS11_OBJECT_private *key,
 	 * on tokens that support EC_MONTGOMERY derive. */
 	rv = pkcs11_derive_with_mechanism(key, &mechanism, secret, secretlen);
 	if (rv != CKR_OK)
+		return -1;
+
+	/* X25519/X448 shared secrets have fixed lengths. */
+	if (*secretlen != peer_pub_len)
+		return -1;
+
+	/* Reject low-order inputs producing an all-zero shared secret,
+	 * matching OpenSSL's X25519/X448 behavior. */
+	if (CRYPTO_memcmp(secret, zero, *secretlen) == 0)
 		return -1;
 
 	return 1;
@@ -2018,6 +2033,9 @@ static int pkcs11_xdh_pmeth_derive(EVP_PKEY_CTX *ctx,
 			peer_public, &peer_public_len) != 1 ||
 			peer_public_len != required)
 		return 0;
+
+	/* Request the required secret size, not the caller's buffer capacity. */
+	*secretlen = required;
 
 	if (pkcs11_evp_pkey_xdh_derive(key, peer_public,
 			peer_public_len, secret, secretlen) <= 0)
