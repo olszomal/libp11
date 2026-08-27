@@ -107,6 +107,50 @@ static P11_PKEY_METHOD pkey_methods[] = {
 #endif /* LIBP11_HAVE_ECX_METHODS */
 };
 
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && \
+	!defined(LIBRESSL_VERSION_NUMBER)
+
+static CRYPTO_ONCE pkey_method_lock_once = CRYPTO_ONCE_STATIC_INIT;
+static CRYPTO_RWLOCK *pkey_method_lock = NULL;
+
+/*
+ * Shared by all ENGINE instances; do not free it from per-ENGINE cleanup.
+ */
+static void pkey_method_lock_init(void)
+{
+	pkey_method_lock = CRYPTO_THREAD_lock_new();
+}
+
+static int pkey_method_lock_acquire(void)
+{
+	if (!CRYPTO_THREAD_run_once(&pkey_method_lock_once,
+			pkey_method_lock_init) ||
+			pkey_method_lock == NULL)
+		return 0;
+
+	return CRYPTO_THREAD_write_lock(pkey_method_lock);
+}
+
+static void pkey_method_lock_release(void)
+{
+	CRYPTO_THREAD_unlock(pkey_method_lock);
+}
+
+#else
+
+static int pkey_method_lock_acquire(void)
+{
+	CRYPTO_w_lock(CRYPTO_LOCK_ENGINE);
+	return 1;
+}
+
+static void pkey_method_lock_release(void)
+{
+	CRYPTO_w_unlock(CRYPTO_LOCK_ENGINE);
+}
+
+#endif
+
 static P11_PKEY_METHOD *pkey_method_by_type(int type)
 {
 	size_t i;
@@ -2140,6 +2184,7 @@ static void pkey_method_reset(P11_PKEY_METHOD *state)
 static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 {
 	P11_PKEY_METHOD *state;
+	EVP_PKEY_METHOD *method = NULL;
 #if OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER)
 	EVP_PKEY_METHOD *original_meth;
 #else
@@ -2152,9 +2197,14 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	if (state == NULL)
 		return NULL;
 
+	if (!pkey_method_lock_acquire())
+		return NULL;
+
 	/* Already initialized */
-	if (state->method != NULL)
-		return state->method;
+	if (state->method != NULL) {
+		method = state->method;
+		goto end;
+	}
 
 	/*
 	 * PKEY methods are wrappers around the original OpenSSL method.
@@ -2166,11 +2216,11 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	original_meth = EVP_PKEY_meth_find(state->type);
 #endif /* OPENSSL_VERSION_NUMBER < 0x10101000L || defined(LIBRESSL_VERSION_NUMBER) */
 	if (original_meth == NULL)
-		return NULL;
+		goto end;
 
 	EVP_PKEY_meth_get0_info(&original_type, &original_flags, original_meth);
 	if (original_type != state->type)
-		return NULL;
+		goto end;
 
 #ifdef LIBP11_HAVE_ECX_METHODS
 	/*
@@ -2179,18 +2229,18 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 	 */
 	if (state->kind == P11_PKEY_EDDSA &&
 			!(original_flags & EVP_PKEY_FLAG_SIGCTX_CUSTOM))
-		return NULL;
+		goto end;
 #endif /* LIBP11_HAVE_ECX_METHODS */
 
-	state->method = EVP_PKEY_meth_new(state->type, original_flags);
-	if (state->method == NULL)
-		return NULL;
+	method = EVP_PKEY_meth_new(state->type, original_flags);
+	if (method == NULL)
+		goto end;
 
 	/*
 	 * Start with the complete OpenSSL implementation so that ctrl,
 	 * keygen, cleanup, peer-key handling, etc. remain unchanged.
 	 */
-	EVP_PKEY_meth_copy(state->method, original_meth);
+	EVP_PKEY_meth_copy(method, original_meth);
 
 	switch (state->kind) {
 	case P11_PKEY_RSA:
@@ -2206,9 +2256,9 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		if (state->original_decrypt == NULL)
 			goto error;
 
-		EVP_PKEY_meth_set_sign(state->method, state->original_init,
+		EVP_PKEY_meth_set_sign(method, state->original_init,
 			pkcs11_pkey_rsa_sign);
-		EVP_PKEY_meth_set_decrypt(state->method, state->original_decrypt_init,
+		EVP_PKEY_meth_set_decrypt(method, state->original_decrypt_init,
 			pkcs11_pkey_rsa_decrypt);
 		break;
 
@@ -2220,7 +2270,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		if (state->original_sign == NULL)
 			goto error;
 
-		EVP_PKEY_meth_set_sign(state->method, state->original_init,
+		EVP_PKEY_meth_set_sign(method, state->original_init,
 			pkcs11_pkey_ec_sign);
 		break;
 #endif /* OPENSSL_NO_EC */
@@ -2235,15 +2285,16 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		EVP_PKEY_meth_get_sign(original_meth, &state->original_init,
 			&state->original_sign);
 
-		EVP_PKEY_meth_get_digestsign(original_meth, &state->original_digestsign);
+		EVP_PKEY_meth_get_digestsign(original_meth,
+			&state->original_digestsign);
 
 		if (state->original_digestsign == NULL)
 			goto error;
 
-		EVP_PKEY_meth_set_sign(state->method, state->original_init,
+		EVP_PKEY_meth_set_sign(method, state->original_init,
 			pkcs11_ecx_sign);
-
-		EVP_PKEY_meth_set_digestsign(state->method, pkcs11_ecx_digestsign);
+		EVP_PKEY_meth_set_digestsign(method,
+			pkcs11_ecx_digestsign);
 		break;
 
 	case P11_PKEY_XDH:
@@ -2253,7 +2304,7 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		if (state->original_derive == NULL)
 			goto error;
 
-		EVP_PKEY_meth_set_derive(state->method, state->original_init,
+		EVP_PKEY_meth_set_derive(method, state->original_init,
 			pkcs11_ecx_derive);
 		break;
 #endif /* LIBP11_HAVE_ECX_METHODS */
@@ -2262,12 +2313,18 @@ static EVP_PKEY_METHOD *pkcs11_pkey_method(int type)
 		goto error;
 	}
 
-	return state->method;
+	/* Publish only after the method is fully constructed. */
+	state->method = method;
+	goto end;
 
 error:
-	EVP_PKEY_meth_free(state->method);
+	EVP_PKEY_meth_free(method);
+	method = NULL;
 	pkey_method_reset(state);
-	return NULL;
+
+end:
+	pkey_method_lock_release();
+	return method;
 }
 
 /*
