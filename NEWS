@@ -6,6 +6,8 @@ New in 0.4.21; unreleased
   an ENGINE callback now leaks methods; use the bundled engine, which caches
   methods per ENGINE.
 * Added PKCS#11 provider support for `openssl genpkey` (Małgorzata Olszówka)
+* Documented RSA-OAEP as the default padding mode for RSA encryption and
+  decryption in the PKCS#11 provider
 
 New in 0.4.20; 2026-08-08; Michał Trojnara
 * Added PKCS#11 3.2 interface discovery and updated the bundled header

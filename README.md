@@ -218,6 +218,28 @@ OSSL_PROVIDER_add_conf_parameter(provider, "pkcs11_module",
 		"/path/to/pkcs11module.so");
 ```
 
+## RSA asymmetric cipher padding
+
+Since libp11-0.4.19, the PKCS#11 provider uses RSA-OAEP padding by default for
+RSA encryption and decryption. OAEP is recommended by OpenSSL for new
+applications because PKCS#1 v1.5 padding has known security limitations.
+
+To decrypt data encrypted using PKCS#1 v1.5 padding, select it explicitly:
+```
+$ openssl pkeyutl -decrypt \
+         -inkey "pkcs11:object=my-key;type=private" \
+         -pkeyopt rsa_padding_mode:pkcs1 \
+         -in secret.enc
+```
+RSA-OAEP with SHA-256 can be selected explicitly with:
+```
+         -pkeyopt rsa_padding_mode:oaep \
+         -pkeyopt rsa_oaep_md:sha256 \
+         -pkeyopt rsa_mgf1_md:sha256
+```
+
+See the [OpenSSL RSA documentation](https://docs.openssl.org/master/man3/RSA_public_encrypt/#description)
+for details and security considerations.
 
 # PKCS#11 engine configuration
 
