@@ -67,6 +67,9 @@ static const unsigned char STR_X448[] = {
 
 static int pkcs11_find_keys(PKCS11_SLOT_private *, CK_SESSION_HANDLE, unsigned int,
 	PKCS11_TEMPLATE *);
+static int pkcs11_init_generated_key(PKCS11_SLOT_private *slot,
+	CK_SESSION_HANDLE session, CK_OBJECT_HANDLE pub_object,
+	CK_OBJECT_HANDLE priv_object, PKCS11_KEY **ret);
 static int pkcs11_init_key(PKCS11_SLOT_private *, CK_SESSION_HANDLE session,
 	CK_OBJECT_HANDLE o, CK_OBJECT_CLASS type, PKCS11_KEY **);
 static int pkcs11_next_key(PKCS11_CTX_private *ctx, PKCS11_SLOT_private *,
@@ -426,7 +429,27 @@ PKCS11_OBJECT_private *pkcs11_object_from_object(PKCS11_OBJECT_private *obj,
 	CK_SESSION_HANDLE session, CK_OBJECT_CLASS object_class)
 {
 	PKCS11_TEMPLATE tmpl = {0};
-	PKCS11_OBJECT_private *ret;
+	PKCS11_OBJECT_private *ret = NULL;
+	int release = 0;
+
+	if (obj->object_class == CKO_PRIVATE_KEY &&
+			object_class == CKO_PUBLIC_KEY &&
+			obj->public_object != CK_INVALID_HANDLE) {
+		if (session == CK_INVALID_HANDLE) {
+			if (!pkcs11_session_pool_acquire(obj->slot, 0, &session))
+				release = 1;
+		}
+
+		if (session != CK_INVALID_HANDLE)
+			ret = pkcs11_object_from_handle(obj->slot, session,
+				obj->public_object);
+
+		if (release)
+			pkcs11_session_pool_release(obj->slot, session);
+
+		if (ret != NULL)
+			return ret;
+	}
 
 	pkcs11_addattr_var(&tmpl, CKA_CLASS, object_class);
 	pkcs11_addattr(&tmpl, CKA_ID, obj->id, obj->id_len);
@@ -502,6 +525,7 @@ int pkcs11_reload_object(PKCS11_OBJECT_private *obj)
 		pkcs11_addattr_s(&tmpl, CKA_LABEL, obj->label);
 
 	obj->object = pkcs11_handle_from_template(slot, session, &tmpl);
+	obj->public_object = CK_INVALID_HANDLE;
 
 	pkcs11_zap_attrs(&tmpl);
 	pkcs11_session_pool_release(slot, session);
@@ -561,7 +585,8 @@ int pkcs11_rsa_keygen(PKCS11_SLOT_private *slot, unsigned int bits,
 		&pub_key_obj, &priv_key_obj));
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	pkcs11_session_pool_release(slot, session);
@@ -655,8 +680,8 @@ int pkcs11_ec_keygen(PKCS11_SLOT_private *slot, const char *curve,
 		&pub_key_obj, &priv_key_obj));
 
 	if (rv == CKR_OK && ret_key != NULL &&
-			pkcs11_init_key(slot, session, priv_key_obj,
-				CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	pkcs11_session_pool_release(slot, session);
@@ -728,7 +753,8 @@ int pkcs11_eddsa_keygen(PKCS11_SLOT_private *slot,
 		&pub_key_obj, &priv_key_obj));
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	/* cleanup */
@@ -790,7 +816,8 @@ int pkcs11_xdh_keygen(PKCS11_SLOT_private *slot,
 		&pub_key_obj, &priv_key_obj));
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	/* cleanup */
@@ -886,7 +913,8 @@ int pkcs11_mldsa_keygen(PKCS11_SLOT_private *slot,
 	}
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	/* cleanup */
@@ -982,7 +1010,8 @@ int pkcs11_mlkem_keygen(PKCS11_SLOT_private *slot, int nid,
 	}
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	/* cleanup */
@@ -1077,7 +1106,8 @@ int pkcs11_slhdsa_keygen(PKCS11_SLOT_private *slot,
 		&pub_key_obj, &priv_key_obj));
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	/* cleanup */
@@ -1142,7 +1172,8 @@ int pkcs11_falcon_keygen(PKCS11_SLOT_private *slot,
 		&pub_key_obj, &priv_key_obj));
 
 	if (rv == CKR_OK && ret_key != NULL &&
-		pkcs11_init_key(slot, session, priv_key_obj, CKO_PRIVATE_KEY, ret_key))
+		pkcs11_init_generated_key(slot, session,
+			pub_key_obj, priv_key_obj, ret_key))
 		ret = -1;
 
 	/* cleanup */
@@ -1547,6 +1578,25 @@ PKCS11_OBJECT_private *pkcs11_object_ref(PKCS11_OBJECT_private *obj)
 {
 	pkcs11_atomic_add(&obj->refcnt, 1, &obj->lock);
 	return obj;
+}
+
+static int pkcs11_init_generated_key(PKCS11_SLOT_private *slot,
+	CK_SESSION_HANDLE session, CK_OBJECT_HANDLE pub_object,
+	CK_OBJECT_HANDLE priv_object, PKCS11_KEY **ret)
+{
+	PKCS11_KEY *priv = NULL;
+
+	if (ret == NULL)
+		return 0;
+
+	if (pkcs11_init_key(slot, session, priv_object,
+			CKO_PRIVATE_KEY, &priv))
+		return -1;
+
+	priv->_private->public_object = pub_object;
+
+	*ret = priv;
+	return 0;
 }
 
 static int pkcs11_init_key(PKCS11_SLOT_private *slot, CK_SESSION_HANDLE session,

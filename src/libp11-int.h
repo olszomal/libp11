@@ -120,6 +120,7 @@ struct pkcs11_object_private {
 	PKCS11_SLOT_private *slot;
 	CK_OBJECT_CLASS object_class;
 	CK_OBJECT_HANDLE object;
+	CK_OBJECT_HANDLE public_object;
 	CK_BBOOL always_authenticate;
 	unsigned char id[255];
 	size_t id_len;
