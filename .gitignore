@@ -92,6 +92,7 @@ tests/fork-change-slot-prov
 tests/rsa-oaep-prov
 tests/rsa-pss-sign-prov
 tests/rsa-keygen
+tests/ec-duplicate-key
 tests/ec-keygen
 tests/ec-derive
 tests/ec-derive-prov

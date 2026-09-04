@@ -29,6 +29,7 @@ check_PROGRAMS = \
 	check-all-prov \
 	rsa-keygen \
 	ec-keygen \
+	ec-duplicate-key \
 	ec-derive \
 	ec-derive-prov \
 	ed25519-keygen \
@@ -51,6 +52,7 @@ dist_check_SCRIPTS = \
 	rsa-check-privkey.softhsm \
 	rsa-cert-store.softhsm \
 	rsa-keygen.softhsm \
+	ec-duplicate-key.softhsm \
 	ec-testfork.softhsm \
 	ec-evp-sign.softhsm \
 	ec-check-privkey.softhsm \
