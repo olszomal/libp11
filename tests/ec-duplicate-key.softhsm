@@ -24,6 +24,9 @@ outdir="output.$$"
 # Initialize SoftHSM DB
 init_db
 
+# Load openssl settings
+. ${srcdir}/openssl-settings.sh
+
 # Create token
 init_card "token1"
 
