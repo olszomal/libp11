@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Copyright © 2026 Mobi - Com Polska Sp. z o.o.
+# Author: Małgorzata Olszówka <Malgorzata.Olszowka@stunnel.org>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+outdir="output.$$"
+
+# Load common test functions
+. ${srcdir}/common.sh
+
+# Initialize SoftHSM DB
+init_db
+
+# Create token
+init_card "token1"
+
+trap cleanup EXIT
+
+${WRAPPER} ./ec-duplicate-key ${MODULE} token1 ${PIN}
+rc=$?
+
+# Show generated objects also when the regression test fails
+list_objects token1
+
+if [[ $rc -eq 77 ]]; then
+	echo "Duplicate key ID test skipped."
+	rm -rf "$outdir"
+	exit 77
+elif [[ $rc -ne 0 ]]; then
+	echo "Duplicate key ID test failed."
+	exit 1
+fi
+
+echo "Checking pkcs11-tool result..."
+
+list_objects token1 | grep -q "duplicate-id-1"
+if [[ $? -ne 0 ]]; then
+	echo "The first key pair was not properly generated."
+	exit 1
+fi
+
+list_objects token1 | grep -q "duplicate-id-2"
+if [[ $? -ne 0 ]]; then
+	echo "The second key pair was not properly generated."
+	exit 1
+fi
+
+rm -rf "$outdir"
+
+exit 0
